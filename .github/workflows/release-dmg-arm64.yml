@@ -1,0 +1,69 @@
+name: Release DMG (arm64)
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build arm64 app and package DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DERIVED_DATA="$RUNNER_TEMP/DerivedData"
+          xcodebuild \
+            -project VSCode-Switcher.xcodeproj \
+            -scheme VSCode-Switcher \
+            -configuration Release \
+            -derivedDataPath "$DERIVED_DATA" \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+          APP_PATH="$DERIVED_DATA/Build/Products/Release/VSCode-Switcher.app"
+          test -d "$APP_PATH"
+
+          BIN_PATH="$APP_PATH/Contents/MacOS/VSCode-Switcher"
+          test -f "$BIN_PATH"
+          ARCHS_FOUND="$(lipo -archs "$BIN_PATH")"
+          if [[ "$ARCHS_FOUND" != "arm64" ]]; then
+            echo "Expected arm64-only binary, got: $ARCHS_FOUND" >&2
+            exit 1
+          fi
+
+          VERSION="${GITHUB_REF_NAME}"
+          DIST_DIR="$PWD/dist"
+          mkdir -p "$DIST_DIR"
+
+          DMG_NAME="VSCode-Switcher-${VERSION}-arm64.dmg"
+          DMG_PATH="$DIST_DIR/$DMG_NAME"
+
+          STAGING_DIR="$RUNNER_TEMP/dmg-staging"
+          rm -rf "$STAGING_DIR"
+          mkdir -p "$STAGING_DIR"
+          ditto "$APP_PATH" "$STAGING_DIR/VSCode-Switcher.app"
+          ln -s /Applications "$STAGING_DIR/Applications"
+
+          hdiutil create \
+            -volname "VSCode-Switcher" \
+            -srcfolder "$STAGING_DIR" \
+            -ov \
+            -format UDZO \
+            "$DMG_PATH"
+
+      - name: Upload DMG to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
+          generate_release_notes: true
