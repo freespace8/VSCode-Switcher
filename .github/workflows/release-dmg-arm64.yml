@@ -20,18 +20,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          DERIVED_DATA="$RUNNER_TEMP/DerivedData"
+          BUILD_DIR="$PWD/build"
+          rm -rf "$BUILD_DIR"
+          mkdir -p "$BUILD_DIR"
+
           xcodebuild \
             -project VSCode-Switcher.xcodeproj \
             -target VSCode-Switcher \
             -configuration Release \
-            -derivedDataPath "$DERIVED_DATA" \
+            CONFIGURATION_BUILD_DIR="$BUILD_DIR" \
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO \
             build
 
-          APP_PATH="$DERIVED_DATA/Build/Products/Release/VSCode-Switcher.app"
+          APP_PATH="$BUILD_DIR/VSCode-Switcher.app"
           test -d "$APP_PATH"
 
           BIN_PATH="$APP_PATH/Contents/MacOS/VSCode-Switcher"
