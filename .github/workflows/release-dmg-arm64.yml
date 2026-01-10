@@ -67,10 +67,64 @@ jobs:
             -format UDZO \
             "$DMG_PATH"
 
+      - name: Generate release notes from commits
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${GITHUB_REF_NAME}"
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+
+          PREV_TAG="$(git tag -l 'v*' --sort=-version:refname | grep -v "^${CURRENT_TAG}$" | head -n 1 || true)"
+          if [[ -n "${PREV_TAG}" ]]; then
+            RANGE="${PREV_TAG}..${GITHUB_SHA}"
+          else
+            RANGE="${GITHUB_SHA}"
+          fi
+
+          LOG_SUBJECTS="$(git log --no-merges --pretty=format:%s ${RANGE})"
+
+          count_prefix() {
+            local prefix="$1"
+            printf "%s\n" "${LOG_SUBJECTS}" | grep -E -c "^${prefix}:" || true
+          }
+
+          list_prefix() {
+            local prefix="$1"
+            printf "%s\n" "${LOG_SUBJECTS}" | grep -E "^${prefix}:" | sed -E "s/^${prefix}:[[:space:]]*/- /" || true
+          }
+
+          ALL_LIST="$(printf "%s\n" "${LOG_SUBJECTS}" | sed -E 's/^[[:space:]]*//; s/[[:space:]]*$//;' | grep -v '^$' | sed -E 's/^/- /' || true)"
+
+          {
+            echo "## 更新内容"
+            echo
+            echo "### 统计（提交前缀）"
+            echo "- Bug 修复（fix）: $(count_prefix fix)"
+            echo "- 新功能（feat）: $(count_prefix feat)"
+            echo "- 性能（perf）: $(count_prefix perf)"
+            echo "- 重构（refactor）: $(count_prefix refactor)"
+            echo "- 文档（docs）: $(count_prefix docs)"
+            echo "- 杂项（chore）: $(count_prefix chore)"
+            echo
+            echo "### 变更列表"
+            if [[ -n "${ALL_LIST}" ]]; then
+              printf "%s\n" "${ALL_LIST}"
+            else
+              echo "- （无）"
+            fi
+            echo
+            if [[ -n "${PREV_TAG}" ]]; then
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${CURRENT_TAG}"
+            fi
+          } > RELEASE_NOTES.md
+
       - name: Upload DMG to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.dmg
           fail_on_unmatched_files: true
-          draft: true
-          generate_release_notes: true
+          draft: false
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
