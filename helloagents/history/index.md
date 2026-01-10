@@ -13,6 +13,7 @@
 | 202601101225 | dock_mode_splitview | 功能 | ✅已完成 | `2026-01/202601101225_dock_mode_splitview/` |
 | 202601101236 | sidebar_expand_dock | 功能 | ✅已完成 | `2026-01/202601101236_sidebar_expand_dock/` |
 | 202601101236 | remove_dock_mode | 变更 | ✅已完成 | `2026-01/202601101236_remove_dock_mode/` |
+| 202601101431 | vscode_window_list_reorder_alias | 功能 | ✅已完成 | `2026-01/202601101431_vscode_window_list_reorder_alias/` |
 
 ---
 
@@ -25,3 +26,4 @@
 - [202601101225_dock_mode_splitview](2026-01/202601101225_dock_mode_splitview/) - Dock 模式：左右分栏并将 VSCode 窗口停靠到右侧区域
 - [202601101236_sidebar_expand_dock](2026-01/202601101236_sidebar_expand_dock/) - Dock 模式：默认窄侧栏，Dock 时展开右侧区域并保持全局热键常驻
 - [202601101236_remove_dock_mode](2026-01/202601101236_remove_dock_mode/) - 移除 Dock 右侧区域并回归纯侧栏
+- [202601101431_vscode_window_list_reorder_alias](2026-01/202601101431_vscode_window_list_reorder_alias/) - 窗口列表交互增强：拖拽排序/整行点击激活/别名/新窗口追加

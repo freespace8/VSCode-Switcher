@@ -2,7 +2,7 @@
 
 ## 概述
 
-本项目无数据库；仅使用内存模型 + UserDefaults 持久化“窗口编号映射”。
+本项目无数据库；仅使用内存模型 + UserDefaults 持久化窗口顺序/别名/编号映射。
 
 ## 核心结构
 
@@ -28,3 +28,5 @@
 
 - `VSCodeSwitcher.numberMapping`：窗口编号映射（`[Int: WindowBookmark]` JSON 编码）
 - `VSCodeSwitcher.accessibilityAlertShown`：是否已展示过一次性权限提示
+- `VSCodeSwitcher.windowOrder`：窗口顺序（`[String]`，元素为 `VSCodeWindowItem.id`）
+- `VSCodeSwitcher.windowAliases`：窗口别名（`[String: String]` JSON 编码；key 为 `VSCodeWindowItem.id`）

@@ -177,6 +177,7 @@ final class VSCodeWindowSwitcher {
         static let axWindowNumberAttribute: CFString = "AXWindowNumber" as CFString
         static let accessibilityAlertShownKey = "VSCodeSwitcher.accessibilityAlertShown"
         static let userDefaultsWindowOrderKey = "VSCodeSwitcher.windowOrder"
+        static let userDefaultsWindowAliasesKey = "VSCodeSwitcher.windowAliases"
 
         static let defaultSidebarWidth: CGFloat = 320
         static let minSidebarWidth: CGFloat = 260
@@ -269,9 +270,13 @@ final class VSCodeWindowSwitcher {
 
     func listOrderedVSCodeWindows() -> [VSCodeWindowItem] {
         let windows = listOpenVSCodeWindows()
-        let order = loadWindowOrder()
+        var order = loadWindowOrder()
 
         if order.isEmpty {
+            if !windows.isEmpty {
+                order = windows.map(\.id)
+                UserDefaults.standard.set(order, forKey: Constants.userDefaultsWindowOrderKey)
+            }
             return windows
         }
 
@@ -280,15 +285,27 @@ final class VSCodeWindowSwitcher {
         var ordered: [VSCodeWindowItem] = []
         ordered.reserveCapacity(windows.count)
 
+        var seenIDs = Set<String>()
         for id in order {
+            if seenIDs.contains(id) { continue }
+            seenIDs.insert(id)
             if let window = windowsByID[id] {
                 ordered.append(window)
             }
         }
 
-        let orderedIDs = Set(ordered.map(\.id))
-        for window in windows where !orderedIDs.contains(window.id) {
+        var appendedIDs: [String] = []
+        appendedIDs.reserveCapacity(windows.count)
+
+        for window in windows where !seenIDs.contains(window.id) {
             ordered.append(window)
+            seenIDs.insert(window.id)
+            appendedIDs.append(window.id)
+        }
+
+        if !appendedIDs.isEmpty {
+            order.append(contentsOf: appendedIDs)
+            UserDefaults.standard.set(order, forKey: Constants.userDefaultsWindowOrderKey)
         }
 
         return ordered
@@ -297,6 +314,22 @@ final class VSCodeWindowSwitcher {
     func saveWindowOrder(_ windows: [VSCodeWindowItem]) {
         let ids = windows.map(\.id)
         UserDefaults.standard.set(ids, forKey: Constants.userDefaultsWindowOrderKey)
+    }
+
+    func windowAliases() -> [String: String] {
+        loadWindowAliases()
+    }
+
+    func setWindowAlias(_ alias: String?, forWindowID id: String) {
+        var aliases = loadWindowAliases()
+
+        if let alias = alias?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty {
+            aliases[id] = alias
+        } else {
+            aliases.removeValue(forKey: id)
+        }
+
+        saveWindowAliases(aliases)
     }
 
     func diagnosticsSummary() -> String {
@@ -377,6 +410,15 @@ final class VSCodeWindowSwitcher {
         }
 
         focusWindow(targetWindow, in: axApp)
+    }
+
+    func focusAndTile(window: VSCodeWindowItem) {
+        let targetScreenFrame = appWindow?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let desiredSidebarWidth = appWindow?.frame.width ?? Constants.defaultSidebarWidth
+
+        bringAppWindowToFront()
+        tileAppWindow(to: targetScreenFrame, sidebarWidth: desiredSidebarWidth)
+        focusAndTileVSCodeWindow(window, targetScreenFrame: targetScreenFrame)
     }
 
     func handleHotKeyFocusNumber(_ number: Int) {
@@ -592,6 +634,22 @@ final class VSCodeWindowSwitcher {
 
     private func loadWindowOrder() -> [String] {
         (UserDefaults.standard.array(forKey: Constants.userDefaultsWindowOrderKey) as? [String]) ?? []
+    }
+
+    private func saveWindowAliases(_ aliases: [String: String]) {
+        do {
+            let data = try JSONEncoder().encode(aliases)
+            UserDefaults.standard.set(data, forKey: Constants.userDefaultsWindowAliasesKey)
+        } catch {
+            return
+        }
+    }
+
+    private func loadWindowAliases() -> [String: String] {
+        guard let data = UserDefaults.standard.data(forKey: Constants.userDefaultsWindowAliasesKey) else {
+            return [:]
+        }
+        return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
     }
 
     private func clampedSidebarWidth(for screenFrame: CGRect, desiredWidth: CGFloat? = nil) -> CGFloat {
