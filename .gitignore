@@ -1,4 +1,4 @@
-build/
+# Agent 生成的方案/文档（不入库）
 helloagents/
 
 # Xcode / xcodebuild
