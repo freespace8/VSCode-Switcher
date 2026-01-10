@@ -394,30 +394,59 @@ final class VSCodeWindowSwitcher {
 
         let windowsByID = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
 
-        var ordered: [VSCodeWindowItem] = []
-        ordered.reserveCapacity(windows.count)
+        var didChangeOrder = false
 
         var seenIDs = Set<String>()
+        seenIDs.reserveCapacity(order.count)
+
+        var dedupedOrder: [String] = []
+        dedupedOrder.reserveCapacity(order.count)
         for id in order {
-            if seenIDs.contains(id) { continue }
-            seenIDs.insert(id)
+            if seenIDs.insert(id).inserted {
+                dedupedOrder.append(id)
+            } else {
+                didChangeOrder = true
+            }
+        }
+        order = dedupedOrder
+
+        var emptySlotIndices: [Int] = []
+        emptySlotIndices.reserveCapacity(order.count)
+        for (index, id) in order.enumerated() where windowsByID[id] == nil {
+            emptySlotIndices.append(index)
+        }
+
+        var knownIDs = Set(order)
+        knownIDs.reserveCapacity(order.count + windows.count)
+
+        var emptySlotCursor = 0
+        for window in windows where !knownIDs.contains(window.id) {
+            if emptySlotCursor < emptySlotIndices.count {
+                let slotIndex = emptySlotIndices[emptySlotCursor]
+                emptySlotCursor += 1
+                order[slotIndex] = window.id
+            } else {
+                order.append(window.id)
+            }
+            knownIDs.insert(window.id)
+            didChangeOrder = true
+        }
+
+        while order.count > 10, let lastID = order.last, windowsByID[lastID] == nil {
+            order.removeLast()
+            didChangeOrder = true
+        }
+
+        if didChangeOrder {
+            UserDefaults.standard.set(order, forKey: Constants.userDefaultsWindowOrderKey)
+        }
+
+        var ordered: [VSCodeWindowItem] = []
+        ordered.reserveCapacity(windows.count)
+        for id in order {
             if let window = windowsByID[id] {
                 ordered.append(window)
             }
-        }
-
-        var appendedIDs: [String] = []
-        appendedIDs.reserveCapacity(windows.count)
-
-        for window in windows where !seenIDs.contains(window.id) {
-            ordered.append(window)
-            seenIDs.insert(window.id)
-            appendedIDs.append(window.id)
-        }
-
-        if !appendedIDs.isEmpty {
-            order.append(contentsOf: appendedIDs)
-            UserDefaults.standard.set(order, forKey: Constants.userDefaultsWindowOrderKey)
         }
 
         return ordered
@@ -426,6 +455,15 @@ final class VSCodeWindowSwitcher {
     func saveWindowOrder(_ windows: [VSCodeWindowItem]) {
         let ids = windows.map(\.id)
         UserDefaults.standard.set(ids, forKey: Constants.userDefaultsWindowOrderKey)
+    }
+
+    func slotIndexForWindowID(_ id: String, limit: Int = 10) -> Int? {
+        guard limit > 0 else { return nil }
+        let order = loadWindowOrder()
+        for (index, slotID) in order.prefix(limit).enumerated() where slotID == id {
+            return index
+        }
+        return nil
     }
 
     func windowAliases() -> [String: String] {
@@ -528,11 +566,16 @@ final class VSCodeWindowSwitcher {
         guard (0...9).contains(number) else { return }
         guard ensureAccessibilityPermission(prompt: false) else { return }
 
-        let orderedWindows = listOrderedVSCodeWindows()
-        let index = number == 0 ? 9 : (number - 1)
-        guard index < orderedWindows.count else { return }
+        let slotIndex = number == 0 ? 9 : (number - 1)
+        let order = loadWindowOrder()
+        guard order.indices.contains(slotIndex) else { return }
 
-        focus(window: orderedWindows[index])
+        let targetID = order[slotIndex]
+        let windows = listOpenVSCodeWindows()
+        let windowsByID = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
+        guard let window = windowsByID[targetID] else { return }
+
+        focus(window: window)
     }
 
     func windowNumberAssignment(for window: VSCodeWindowItem) -> Int? {
