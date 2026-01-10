@@ -7,6 +7,7 @@
 
 import SwiftUI
 import Combine
+import AppKit
 
 @MainActor
 final class VSCodeWindowsViewModel: ObservableObject {
@@ -58,7 +59,7 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            sidebarHeader
 
             if !viewModel.hasAccessibilityPermission {
                 permissionView
@@ -68,13 +69,14 @@ struct ContentView: View {
                 windowList
             }
         }
-        .frame(minWidth: 520, minHeight: 420)
+        .frame(minWidth: 260, minHeight: 420)
+        .background(AppWindowAccessor())
         .onAppear {
             viewModel.refresh()
         }
     }
 
-    private var header: some View {
+    private var sidebarHeader: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text("VSCode Windows")
@@ -184,4 +186,21 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
+}
+
+private struct AppWindowAccessor: NSViewRepresentable {
+    func makeNSView(context: Context) -> AppWindowAccessorView {
+        AppWindowAccessorView()
+    }
+
+    func updateNSView(_ nsView: AppWindowAccessorView, context: Context) {}
+}
+
+private final class AppWindowAccessorView: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window {
+            VSCodeWindowSwitcher.shared.setAppWindow(window)
+        }
+    }
 }

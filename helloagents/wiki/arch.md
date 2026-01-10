@@ -27,9 +27,9 @@ sequenceDiagram
     participant SW as VSCodeWindowSwitcher
     participant AX as AXUIElement
 
-    U->>UI: 点击 Switch
-    UI->>VM: focus(window)
-    VM->>SW: focus(window:)
+    U->>UI: 点击 Switch / Option+数字
+    UI->>VM: focus(...)
+    VM->>SW: focus(...)
     SW->>SW: ensureAccessibilityPermission()
     SW->>SW: activate VSCode app
     SW->>AX: 获取窗口列表并匹配目标

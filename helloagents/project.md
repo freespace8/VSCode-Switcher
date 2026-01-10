@@ -14,6 +14,7 @@
 - **容错:** 对外部系统 API（AX/NSWorkspace）调用默认失败可恢复：失败时直接返回/降级，不崩溃。
 - **窗口标识:** 优先使用 `AXWindowNumber` 匹配目标窗口；缺失时回退使用窗口 `title`（注意同名窗口风险）。
 - **权限处理:** 所有跨进程窗口操作都必须先检查“辅助功能”权限；无权限时只展示引导与重试入口。
+- **Sandbox:** 当前实现依赖跨进程 AX 访问与窗口几何设置，要求 `ENABLE_APP_SANDBOX = NO`（Sandbox 下可能出现 `AXWindows cannotComplete`）。
 
 ## 错误与日志
 - **策略:** 默认不弹异常；仅在“权限缺失”场景弹一次性引导提示。
@@ -22,4 +23,3 @@
 ## 测试与流程
 - **自动化测试:** 当前无测试目标，优先使用手工验收清单。
 - **构建验证:** 使用 Xcode 直接运行，或用 `xcodebuild -project VSCode-Switcher.xcodeproj -scheme VSCode-Switcher build` 验证编译通过。
-

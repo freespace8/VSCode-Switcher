@@ -35,10 +35,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKeyManager?.registerDefaultHotKeys()
     }
 
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
     private func handleHotKey(_ action: HotKeyAction) {
         switch action {
         case .focusNumber(let number):
-            _ = windowSwitcher.focus(number: number)
+            windowSwitcher.handleHotKeyFocusNumber(number)
         }
     }
 }
@@ -168,6 +172,10 @@ final class VSCodeWindowSwitcher {
         static let userDefaultsNumberMappingKey = "VSCodeSwitcher.numberMapping"
         static let axWindowNumberAttribute: CFString = "AXWindowNumber" as CFString
         static let accessibilityAlertShownKey = "VSCodeSwitcher.accessibilityAlertShown"
+
+        static let defaultSidebarWidth: CGFloat = 320
+        static let minSidebarWidth: CGFloat = 260
+        static let minVSCodeWidth: CGFloat = 600
     }
 
     private struct WindowBookmark: Codable {
@@ -176,8 +184,14 @@ final class VSCodeWindowSwitcher {
         var title: String?
     }
 
+    private weak var appWindow: NSWindow?
+
     func bootstrap() {
         _ = ensureAccessibilityPermission()
+    }
+
+    func setAppWindow(_ window: NSWindow) {
+        appWindow = window
     }
 
     func hasAccessibilityPermission() -> Bool {
@@ -290,18 +304,39 @@ final class VSCodeWindowSwitcher {
             return
         }
 
+        let targetWindow: AXUIElement
         if let targetNumber = window.windowNumber,
            let match = windows.first(where: { copyWindowNumber(from: $0) == targetNumber }) {
-            focusWindow(match, in: axApp)
-            return
+            targetWindow = match
+        } else if let match = windows.first(where: { (copyWindowTitle(from: $0) ?? "") == window.title }) {
+            targetWindow = match
+        } else {
+            targetWindow = windows[0]
         }
 
-        if let match = windows.first(where: { (copyWindowTitle(from: $0) ?? "") == window.title }) {
-            focusWindow(match, in: axApp)
-            return
-        }
+        focusWindow(targetWindow, in: axApp)
+    }
 
-        focusWindow(windows[0], in: axApp)
+    func handleHotKeyFocusNumber(_ number: Int) {
+        guard (1...9).contains(number) else { return }
+
+        let targetScreenFrame = appWindow?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let desiredSidebarWidth = appWindow?.frame.width ?? Constants.defaultSidebarWidth
+
+        tileAppWindow(to: targetScreenFrame, sidebarWidth: desiredSidebarWidth)
+
+        guard targetScreenFrame.width > 0, targetScreenFrame.height > 0 else { return }
+        guard ensureAccessibilityPermission() else { return }
+        guard let match = findBookmarkedWindow(number: number) else { return }
+
+        setWindowFrame(match.window, frame: CGRect(
+            x: targetScreenFrame.minX + match.sidebarWidth,
+            y: targetScreenFrame.minY,
+            width: targetScreenFrame.width - match.sidebarWidth,
+            height: targetScreenFrame.height
+        ))
+
+        focusWindow(match.window, in: match.appAX)
     }
 
     func windowNumberAssignment(for window: VSCodeWindowItem) -> Int? {
@@ -397,7 +432,7 @@ final class VSCodeWindowSwitcher {
 
         let alert = NSAlert()
         alert.messageText = "需要开启辅助功能权限"
-        alert.informativeText = "在“系统设置 → 隐私与安全性 → 辅助功能”中启用 VSCode-Switcher，才能用 Option+1/2/3 切换 VSCode 窗口。"
+        alert.informativeText = "在“系统设置 → 隐私与安全性 → 辅助功能”中启用 VSCode-Switcher，才能列出并切换 VSCode 窗口（Option+数字）。"
         alert.addButton(withTitle: "打开系统设置")
         alert.addButton(withTitle: "以后再说")
 
@@ -420,6 +455,52 @@ final class VSCodeWindowSwitcher {
 
     private func runningApplication(bundleIdentifier: String) -> NSRunningApplication? {
         NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first
+    }
+
+    private func tileAppWindow(to screenFrame: CGRect, sidebarWidth: CGFloat) {
+        guard let appWindow else { return }
+        guard screenFrame.width > 0, screenFrame.height > 0 else { return }
+
+        let maxSidebarWidth = max(Constants.minSidebarWidth, screenFrame.width - Constants.minVSCodeWidth)
+        let clampedSidebarWidth = min(max(sidebarWidth, Constants.minSidebarWidth), maxSidebarWidth)
+
+        let newFrame = CGRect(
+            x: screenFrame.minX,
+            y: screenFrame.minY,
+            width: clampedSidebarWidth,
+            height: screenFrame.height
+        )
+
+        appWindow.setFrame(newFrame, display: true, animate: false)
+    }
+
+    private struct BookmarkedMatch {
+        let app: NSRunningApplication
+        let appAX: AXUIElement
+        let window: AXUIElement
+        let sidebarWidth: CGFloat
+    }
+
+    private func findBookmarkedWindow(number: Int) -> BookmarkedMatch? {
+        let mappings = loadNumberMapping()
+        guard let bookmark = mappings[number] else { return nil }
+
+        let app = runningApplication(bundleIdentifier: bookmark.bundleIdentifier) ?? runningVSCodeApplication()
+        guard let app else { return nil }
+
+        app.activate(options: [.activateAllWindows])
+
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        guard let windows = copyWindows(from: axApp), let match = findBookmarkedWindow(bookmark, in: windows) else {
+            return nil
+        }
+
+        let targetScreenFrame = appWindow?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let desiredSidebarWidth = appWindow?.frame.width ?? Constants.defaultSidebarWidth
+        let maxSidebarWidth = max(Constants.minSidebarWidth, targetScreenFrame.width - Constants.minVSCodeWidth)
+        let clampedSidebarWidth = min(max(desiredSidebarWidth, Constants.minSidebarWidth), maxSidebarWidth)
+
+        return BookmarkedMatch(app: app, appAX: axApp, window: match, sidebarWidth: clampedSidebarWidth)
     }
 
     private func copyWindows(from app: AXUIElement) -> [AXUIElement]? {
@@ -485,6 +566,29 @@ final class VSCodeWindowSwitcher {
         _ = AXUIElementSetAttributeValue(app, kAXFocusedWindowAttribute as CFString, window)
         _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+    }
+
+    private func setWindowFrame(_ window: AXUIElement, frame: CGRect) {
+        let axPosition = appKitToAXPosition(frame: frame)
+        var position = axPosition
+        var size = CGSize(width: frame.width, height: frame.height)
+
+        guard let positionValue = AXValueCreate(.cgPoint, &position) else { return }
+        guard let sizeValue = AXValueCreate(.cgSize, &size) else { return }
+
+        _ = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
+        _ = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+    }
+
+    private func appKitToAXPosition(frame: CGRect) -> CGPoint {
+        guard let mainFrame = NSScreen.screens.first?.frame else {
+            return CGPoint(x: frame.minX, y: frame.minY)
+        }
+
+        return CGPoint(
+            x: frame.minX - mainFrame.minX,
+            y: mainFrame.maxY - frame.maxY
+        )
     }
 
     private func unminimizeIfNeeded(_ window: AXUIElement) {
