@@ -66,15 +66,17 @@ final class HotKeyManager {
     }
 
     func registerDefaultHotKeys() {
-        registerHotKey(keyCode: UInt32(kVK_ANSI_1), modifiers: UInt32(optionKey), id: 1)
-        registerHotKey(keyCode: UInt32(kVK_ANSI_2), modifiers: UInt32(optionKey), id: 2)
-        registerHotKey(keyCode: UInt32(kVK_ANSI_3), modifiers: UInt32(optionKey), id: 3)
-        registerHotKey(keyCode: UInt32(kVK_ANSI_4), modifiers: UInt32(optionKey), id: 4)
-        registerHotKey(keyCode: UInt32(kVK_ANSI_5), modifiers: UInt32(optionKey), id: 5)
-        registerHotKey(keyCode: UInt32(kVK_ANSI_6), modifiers: UInt32(optionKey), id: 6)
-        registerHotKey(keyCode: UInt32(kVK_ANSI_7), modifiers: UInt32(optionKey), id: 7)
-        registerHotKey(keyCode: UInt32(kVK_ANSI_8), modifiers: UInt32(optionKey), id: 8)
-        registerHotKey(keyCode: UInt32(kVK_ANSI_9), modifiers: UInt32(optionKey), id: 9)
+        let modifiers = UInt32(controlKey | optionKey)
+        registerHotKey(keyCode: UInt32(kVK_ANSI_1), modifiers: modifiers, id: 1)
+        registerHotKey(keyCode: UInt32(kVK_ANSI_2), modifiers: modifiers, id: 2)
+        registerHotKey(keyCode: UInt32(kVK_ANSI_3), modifiers: modifiers, id: 3)
+        registerHotKey(keyCode: UInt32(kVK_ANSI_4), modifiers: modifiers, id: 4)
+        registerHotKey(keyCode: UInt32(kVK_ANSI_5), modifiers: modifiers, id: 5)
+        registerHotKey(keyCode: UInt32(kVK_ANSI_6), modifiers: modifiers, id: 6)
+        registerHotKey(keyCode: UInt32(kVK_ANSI_7), modifiers: modifiers, id: 7)
+        registerHotKey(keyCode: UInt32(kVK_ANSI_8), modifiers: modifiers, id: 8)
+        registerHotKey(keyCode: UInt32(kVK_ANSI_9), modifiers: modifiers, id: 9)
+        registerHotKey(keyCode: UInt32(kVK_ANSI_0), modifiers: modifiers, id: 10)
     }
 
     private func installEventHandler() {
@@ -133,6 +135,8 @@ final class HotKeyManager {
         switch id {
         case 1...9:
             return .focusNumber(Int(id))
+        case 10:
+            return .focusNumber(0)
         default:
             return nil
         }
@@ -172,6 +176,7 @@ final class VSCodeWindowSwitcher {
         static let userDefaultsNumberMappingKey = "VSCodeSwitcher.numberMapping"
         static let axWindowNumberAttribute: CFString = "AXWindowNumber" as CFString
         static let accessibilityAlertShownKey = "VSCodeSwitcher.accessibilityAlertShown"
+        static let userDefaultsWindowOrderKey = "VSCodeSwitcher.windowOrder"
 
         static let defaultSidebarWidth: CGFloat = 320
         static let minSidebarWidth: CGFloat = 260
@@ -187,7 +192,7 @@ final class VSCodeWindowSwitcher {
     private weak var appWindow: NSWindow?
 
     func bootstrap() {
-        _ = ensureAccessibilityPermission()
+        _ = ensureAccessibilityPermission(prompt: false)
     }
 
     func setAppWindow(_ window: NSWindow) {
@@ -206,7 +211,7 @@ final class VSCodeWindowSwitcher {
     }
 
     func listOpenVSCodeWindows() -> [VSCodeWindowItem] {
-        guard ensureAccessibilityPermission() else {
+        guard ensureAccessibilityPermission(prompt: false) else {
             return []
         }
 
@@ -262,6 +267,38 @@ final class VSCodeWindowSwitcher {
         return items
     }
 
+    func listOrderedVSCodeWindows() -> [VSCodeWindowItem] {
+        let windows = listOpenVSCodeWindows()
+        let order = loadWindowOrder()
+
+        if order.isEmpty {
+            return windows
+        }
+
+        let windowsByID = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
+
+        var ordered: [VSCodeWindowItem] = []
+        ordered.reserveCapacity(windows.count)
+
+        for id in order {
+            if let window = windowsByID[id] {
+                ordered.append(window)
+            }
+        }
+
+        let orderedIDs = Set(ordered.map(\.id))
+        for window in windows where !orderedIDs.contains(window.id) {
+            ordered.append(window)
+        }
+
+        return ordered
+    }
+
+    func saveWindowOrder(_ windows: [VSCodeWindowItem]) {
+        let ids = windows.map(\.id)
+        UserDefaults.standard.set(ids, forKey: Constants.userDefaultsWindowOrderKey)
+    }
+
     func diagnosticsSummary() -> String {
         var lines: [String] = []
         lines.append("AXIsProcessTrusted: \(AXIsProcessTrusted() ? "true" : "false")")
@@ -286,8 +323,33 @@ final class VSCodeWindowSwitcher {
         return lines.joined(separator: "\n")
     }
 
+    func frontmostVSCodeWindow() -> VSCodeWindowItem? {
+        guard ensureAccessibilityPermission(prompt: false) else { return nil }
+        guard let frontmost = NSWorkspace.shared.frontmostApplication,
+              let bundleIdentifier = frontmost.bundleIdentifier,
+              Constants.supportedBundleIdentifiers.contains(bundleIdentifier) else {
+            return nil
+        }
+
+        let pid = frontmost.processIdentifier
+        let axApp = AXUIElementCreateApplication(pid)
+
+        var value: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &value)
+        guard result == .success, let window = value else { return nil }
+        let axWindow = unsafeBitCast(window, to: AXUIElement.self)
+
+        return VSCodeWindowItem(
+            bundleIdentifier: bundleIdentifier,
+            pid: pid,
+            windowNumber: copyWindowNumber(from: axWindow),
+            title: copyWindowTitle(from: axWindow) ?? "(Untitled)",
+            appDisplayName: frontmost.localizedName
+        )
+    }
+
     func focus(window: VSCodeWindowItem) {
-        guard ensureAccessibilityPermission() else {
+        guard ensureAccessibilityPermission(prompt: false) else {
             return
         }
 
@@ -318,22 +380,36 @@ final class VSCodeWindowSwitcher {
     }
 
     func handleHotKeyFocusNumber(_ number: Int) {
-        guard (1...9).contains(number) else { return }
+        guard (0...9).contains(number) else { return }
 
         let targetScreenFrame = appWindow?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
         let desiredSidebarWidth = appWindow?.frame.width ?? Constants.defaultSidebarWidth
 
+        bringAppWindowToFront()
         tileAppWindow(to: targetScreenFrame, sidebarWidth: desiredSidebarWidth)
 
         guard targetScreenFrame.width > 0, targetScreenFrame.height > 0 else { return }
-        guard ensureAccessibilityPermission() else { return }
-        guard let match = findBookmarkedWindow(number: number) else { return }
+        guard ensureAccessibilityPermission(prompt: false) else { return }
+        let orderedWindows = listOrderedVSCodeWindows()
+        let index = number == 0 ? 9 : (number - 1)
+        guard index < orderedWindows.count else { return }
+
+        focusAndTileVSCodeWindow(orderedWindows[index], targetScreenFrame: targetScreenFrame)
+    }
+
+    func focusAndTileVSCodeWindow(_ window: VSCodeWindowItem, targetScreenFrame: CGRect? = nil) {
+        let screenFrame = targetScreenFrame ?? (appWindow?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero)
+        guard screenFrame.width > 0, screenFrame.height > 0 else { return }
+
+        let sidebarWidth = clampedSidebarWidth(for: screenFrame)
+        guard ensureAccessibilityPermission(prompt: false) else { return }
+        guard let match = findWindow(window) else { return }
 
         setWindowFrame(match.window, frame: CGRect(
-            x: targetScreenFrame.minX + match.sidebarWidth,
-            y: targetScreenFrame.minY,
-            width: targetScreenFrame.width - match.sidebarWidth,
-            height: targetScreenFrame.height
+            x: screenFrame.minX + sidebarWidth,
+            y: screenFrame.minY,
+            width: screenFrame.width - sidebarWidth,
+            height: screenFrame.height
         ))
 
         focusWindow(match.window, in: match.appAX)
@@ -384,7 +460,7 @@ final class VSCodeWindowSwitcher {
     @discardableResult
     func focus(number: Int) -> Bool {
         guard (1...9).contains(number) else { return false }
-        guard ensureAccessibilityPermission() else { return false }
+        guard ensureAccessibilityPermission(prompt: false) else { return false }
 
         let mappings = loadNumberMapping()
         guard let bookmark = mappings[number] else { return false }
@@ -412,13 +488,17 @@ final class VSCodeWindowSwitcher {
         return AXIsProcessTrustedWithOptions(options)
     }
 
-    private func ensureAccessibilityPermission() -> Bool {
+    private func ensureAccessibilityPermission(prompt: Bool) -> Bool {
         if AXIsProcessTrusted() {
             return true
         }
 
-        _ = requestAccessibilityIfNeeded()
         showAccessibilityAlertOnce()
+
+        if prompt {
+            _ = requestAccessibilityIfNeeded()
+        }
+
         return false
     }
 
@@ -432,7 +512,7 @@ final class VSCodeWindowSwitcher {
 
         let alert = NSAlert()
         alert.messageText = "需要开启辅助功能权限"
-        alert.informativeText = "在“系统设置 → 隐私与安全性 → 辅助功能”中启用 VSCode-Switcher，才能列出并切换 VSCode 窗口（Option+数字）。"
+        alert.informativeText = "在“系统设置 → 隐私与安全性 → 辅助功能”中启用 VSCode-Switcher，才能列出并切换 VSCode 窗口（⌃⌥数字）。"
         alert.addButton(withTitle: "打开系统设置")
         alert.addButton(withTitle: "以后再说")
 
@@ -461,8 +541,7 @@ final class VSCodeWindowSwitcher {
         guard let appWindow else { return }
         guard screenFrame.width > 0, screenFrame.height > 0 else { return }
 
-        let maxSidebarWidth = max(Constants.minSidebarWidth, screenFrame.width - Constants.minVSCodeWidth)
-        let clampedSidebarWidth = min(max(sidebarWidth, Constants.minSidebarWidth), maxSidebarWidth)
+        let clampedSidebarWidth = clampedSidebarWidth(for: screenFrame, desiredWidth: sidebarWidth)
 
         let newFrame = CGRect(
             x: screenFrame.minX,
@@ -474,33 +553,51 @@ final class VSCodeWindowSwitcher {
         appWindow.setFrame(newFrame, display: true, animate: false)
     }
 
+    private func bringAppWindowToFront() {
+        guard let appWindow else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        appWindow.makeKeyAndOrderFront(nil)
+    }
+
     private struct BookmarkedMatch {
         let app: NSRunningApplication
         let appAX: AXUIElement
         let window: AXUIElement
-        let sidebarWidth: CGFloat
     }
 
-    private func findBookmarkedWindow(number: Int) -> BookmarkedMatch? {
-        let mappings = loadNumberMapping()
-        guard let bookmark = mappings[number] else { return nil }
-
-        let app = runningApplication(bundleIdentifier: bookmark.bundleIdentifier) ?? runningVSCodeApplication()
+    private func findWindow(_ window: VSCodeWindowItem) -> BookmarkedMatch? {
+        let app = NSRunningApplication.runningApplications(withBundleIdentifier: window.bundleIdentifier)
+            .first(where: { $0.processIdentifier == window.pid })
+            ?? runningApplication(bundleIdentifier: window.bundleIdentifier)
+            ?? runningVSCodeApplication()
         guard let app else { return nil }
 
         app.activate(options: [.activateAllWindows])
 
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
-        guard let windows = copyWindows(from: axApp), let match = findBookmarkedWindow(bookmark, in: windows) else {
-            return nil
+        guard let windows = copyWindows(from: axApp) else { return nil }
+
+        let match: AXUIElement?
+        if let windowNumber = window.windowNumber {
+            match = windows.first(where: { copyWindowNumber(from: $0) == windowNumber })
+        } else {
+            match = windows.first(where: { copyWindowTitle(from: $0) == window.title })
         }
 
-        let targetScreenFrame = appWindow?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
-        let desiredSidebarWidth = appWindow?.frame.width ?? Constants.defaultSidebarWidth
-        let maxSidebarWidth = max(Constants.minSidebarWidth, targetScreenFrame.width - Constants.minVSCodeWidth)
-        let clampedSidebarWidth = min(max(desiredSidebarWidth, Constants.minSidebarWidth), maxSidebarWidth)
+        guard let match else {
+            return nil
+        }
+        return BookmarkedMatch(app: app, appAX: axApp, window: match)
+    }
 
-        return BookmarkedMatch(app: app, appAX: axApp, window: match, sidebarWidth: clampedSidebarWidth)
+    private func loadWindowOrder() -> [String] {
+        (UserDefaults.standard.array(forKey: Constants.userDefaultsWindowOrderKey) as? [String]) ?? []
+    }
+
+    private func clampedSidebarWidth(for screenFrame: CGRect, desiredWidth: CGFloat? = nil) -> CGFloat {
+        let width = desiredWidth ?? appWindow?.frame.width ?? Constants.defaultSidebarWidth
+        let maxSidebarWidth = max(Constants.minSidebarWidth, screenFrame.width - Constants.minVSCodeWidth)
+        return min(max(width, Constants.minSidebarWidth), maxSidebarWidth)
     }
 
     private func copyWindows(from app: AXUIElement) -> [AXUIElement]? {

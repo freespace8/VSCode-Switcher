@@ -27,7 +27,7 @@ sequenceDiagram
     participant SW as VSCodeWindowSwitcher
     participant AX as AXUIElement
 
-    U->>UI: 点击 Switch / Option+数字
+    U->>UI: 点击 Switch / ⌃⌥数字
     UI->>VM: focus(...)
     VM->>SW: focus(...)
     SW->>SW: ensureAccessibilityPermission()
