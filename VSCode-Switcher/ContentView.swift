@@ -238,6 +238,10 @@ final class VSCodeWindowsViewModel: ObservableObject {
         windowAliases[id]
     }
 
+    func slotIndex(for window: VSCodeWindowItem) -> Int? {
+        switcher.slotIndexForWindowID(window.id)
+    }
+
     func setAlias(_ alias: String?, forWindowID id: String) {
         switcher.setWindowAlias(alias, forWindowID: id)
         windowAliases = switcher.windowAliases()
@@ -514,10 +518,10 @@ struct ContentView: View {
     }
 
     private func hotKeyLabel(for window: VSCodeWindowItem) -> String {
-        guard let index = viewModel.windows.prefix(10).firstIndex(where: { $0.id == window.id }) else {
+        guard let slotIndex = viewModel.slotIndex(for: window), slotIndex >= 0, slotIndex < 10 else {
             return ""
         }
-        let number = index == 9 ? "0" : String(index + 1)
+        let number = slotIndex == 9 ? "0" : String(slotIndex + 1)
         return "⌃⌥\(number)"
     }
 }
