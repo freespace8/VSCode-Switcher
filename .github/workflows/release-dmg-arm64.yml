@@ -23,7 +23,7 @@ jobs:
           DERIVED_DATA="$RUNNER_TEMP/DerivedData"
           xcodebuild \
             -project VSCode-Switcher.xcodeproj \
-            -scheme VSCode-Switcher \
+            -target VSCode-Switcher \
             -configuration Release \
             -derivedDataPath "$DERIVED_DATA" \
             ARCHS=arm64 \
