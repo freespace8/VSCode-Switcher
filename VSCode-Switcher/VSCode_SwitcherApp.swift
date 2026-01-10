@@ -30,8 +30,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let windowSwitcher = VSCodeWindowSwitcher.shared
     private var hotKeyManager: HotKeyManager?
     private var statusItem: NSStatusItem?
+    private var autoTileMenuItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        enforceSingleInstanceOrExit()
+
         windowSwitcher.bootstrap()
 
         hotKeyManager = HotKeyManager { [weak self] action in
@@ -44,6 +47,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    private func enforceSingleInstanceOrExit() {
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier else {
+            return
+        }
+
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        let instances = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+        guard instances.count > 1 else {
+            return
+        }
+
+        if let existing = instances.first(where: { $0.processIdentifier != selfPID }) {
+            _ = existing.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        }
+
+        NSApp.terminate(nil)
     }
 
     private func handleHotKey(_ action: HotKeyAction) {
@@ -65,6 +86,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "显示/隐藏", action: #selector(toggleMainWindow), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "刷新窗口列表", action: #selector(requestRefresh), keyEquivalent: "r"))
+
+        let autoTile = NSMenuItem(title: "激活后自动平铺", action: #selector(toggleAutoTile), keyEquivalent: "")
+        autoTile.state = windowSwitcher.isAutoTileEnabled ? .on : .off
+        autoTileMenuItem = autoTile
+        menu.addItem(autoTile)
+
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "打开辅助功能设置", action: #selector(openAccessibilitySettings), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
@@ -83,6 +110,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func requestRefresh() {
         NotificationCenter.default.post(name: .vsCodeSwitcherRequestRefresh, object: nil)
+    }
+
+    @objc private func toggleAutoTile() {
+        windowSwitcher.isAutoTileEnabled.toggle()
+        autoTileMenuItem?.state = windowSwitcher.isAutoTileEnabled ? .on : .off
     }
 
     @objc private func openAccessibilitySettings() {
@@ -224,6 +256,8 @@ final class VSCodeWindowSwitcher {
         static let accessibilityAlertShownKey = "VSCodeSwitcher.accessibilityAlertShown"
         static let userDefaultsWindowOrderKey = "VSCodeSwitcher.windowOrder"
         static let userDefaultsWindowAliasesKey = "VSCodeSwitcher.windowAliases"
+        static let userDefaultsAutoTileKey = "VSCodeSwitcher.autoTile"
+        static let userDefaultsSidebarWidthKey = "VSCodeSwitcher.sidebarWidth"
 
     }
 
@@ -234,6 +268,11 @@ final class VSCodeWindowSwitcher {
     }
 
     private weak var appWindow: NSWindow?
+
+    var isAutoTileEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: Constants.userDefaultsAutoTileKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: Constants.userDefaultsAutoTileKey) }
+    }
 
     func bootstrap() {
         _ = ensureAccessibilityPermission(prompt: false)
@@ -698,6 +737,76 @@ final class VSCodeWindowSwitcher {
         _ = AXUIElementSetAttributeValue(app, kAXFocusedWindowAttribute as CFString, window)
         _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+
+        tileAfterFocusing(vsCodeWindow: window)
+    }
+
+    private func tileAfterFocusing(vsCodeWindow: AXUIElement) {
+        guard isAutoTileEnabled else {
+            return
+        }
+
+        guard let targetFrames = computeTilingFrames() else {
+            return
+        }
+
+        if let appWindow {
+            appWindow.setFrame(targetFrames.appWindowFrame, display: true, animate: false)
+        }
+
+        setAXFrame(window: vsCodeWindow, frame: targetFrames.vsCodeFrame)
+    }
+
+    private func computeTilingFrames() -> (appWindowFrame: CGRect, vsCodeFrame: CGRect)? {
+        let screens = NSScreen.screens
+        guard let primaryScreen = NSScreen.main ?? screens.first else {
+            return nil
+        }
+
+        let appScreen = appWindow?.screen ?? primaryScreen
+        let visible = appScreen.visibleFrame
+        guard visible.width > 0, visible.height > 0 else {
+            return nil
+        }
+
+        let sidebarWidth = computeSidebarWidth(in: visible)
+
+        if screens.count <= 1 {
+            let full = appScreen.frame
+            let appFrame = CGRect(x: visible.minX, y: visible.minY, width: sidebarWidth, height: visible.height)
+            let codeFrame = CGRect(x: full.minX + sidebarWidth, y: full.minY, width: max(0, full.width - sidebarWidth), height: full.height)
+            return (appFrame, codeFrame)
+        }
+
+        let codeScreen = screens.first(where: { $0 !== appScreen }) ?? appScreen
+        let codeFull = codeScreen.frame
+        guard codeFull.width > 0, codeFull.height > 0 else {
+            return nil
+        }
+
+        let appFrame = CGRect(x: visible.minX, y: visible.minY, width: sidebarWidth, height: visible.height)
+        let codeFrame = CGRect(x: codeFull.minX, y: codeFull.minY, width: codeFull.width, height: codeFull.height)
+        return (appFrame, codeFrame)
+    }
+
+    private func computeSidebarWidth(in visibleFrame: CGRect) -> CGFloat {
+        let defaults = UserDefaults.standard
+        let stored = defaults.object(forKey: Constants.userDefaultsSidebarWidthKey) as? Double
+        let requested = stored.map { CGFloat($0) } ?? 320
+        return min(max(220, requested), visibleFrame.width * 0.5)
+    }
+
+    private func setAXFrame(window: AXUIElement, frame: CGRect) {
+        var position = CGPoint(x: frame.minX, y: frame.minY)
+        var size = CGSize(width: frame.width, height: frame.height)
+
+        guard let positionValue = AXValueCreate(.cgPoint, &position),
+              let sizeValue = AXValueCreate(.cgSize, &size) else {
+            return
+        }
+
+        _ = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
+        _ = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
     }
 
     private func unminimizeIfNeeded(_ window: AXUIElement) {
