@@ -100,10 +100,6 @@ final class VSCodeWindowsViewModel: ObservableObject {
         switcher.focus(window: window)
     }
 
-    func focusAndTile(_ window: VSCodeWindowItem) {
-        switcher.focusAndTile(window: window)
-    }
-
     func moveWindow(id: String, before targetID: String?) {
         guard let fromIndex = windows.firstIndex(where: { $0.id == id }) else { return }
         withAnimation(.interpolatingSpring(stiffness: 380, damping: 32)) {
@@ -220,6 +216,9 @@ struct ContentView: View {
             viewModel.stopActiveWindowPolling()
             viewModel.stopAutoRefreshObservers()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .vsCodeSwitcherRequestRefresh)) { _ in
+            viewModel.refresh()
+        }
     }
 
     private var sidebarHeader: some View {
@@ -267,7 +266,7 @@ struct ContentView: View {
             Text("No VSCode windows found")
                 .font(.title2)
 
-            Text("Open VSCode (or VSCode Insiders), then hit Refresh.")
+            Text("Open Visual Studio Code, then hit Refresh.")
                 .foregroundStyle(.secondary)
         }
         .padding()
@@ -283,11 +282,8 @@ struct ContentView: View {
                 let shouldShowOriginalTitle = alias != nil && alias != window.title
                 let index = viewModel.windows.firstIndex(where: { $0.id == window.id }) ?? 0
                 HStack(spacing: 10) {
-                    Color.clear
-                        .frame(width: 22)
-
                     Button {
-                        viewModel.focusAndTile(window)
+                        viewModel.focus(window)
                         viewModel.refreshActiveWindow()
                     } label: {
                         HStack(spacing: 0) {
