@@ -1,0 +1,59 @@
+#!/bin/sh
+set -eu
+
+usage() {
+  echo "用法: $0 <tag>" >&2
+  echo "例子: $0 0.1.0    (会创建并推送 v0.1.0)" >&2
+  echo "      $0 v0.1.0  (直接使用 v0.1.0)" >&2
+  exit 2
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+fi
+
+input_tag="${1:-}"
+if [ -z "$input_tag" ]; then
+  usage
+fi
+
+case "$input_tag" in
+  v*) tag="$input_tag" ;;
+  *) tag="v$input_tag" ;;
+esac
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "错误: 当前目录不在 git 仓库内。" >&2
+  exit 1
+}
+cd "$repo_root"
+
+if ! git remote get-url origin >/dev/null 2>&1; then
+  echo "错误: 未配置 origin 远端。" >&2
+  exit 1
+fi
+
+if [ -n "$(git status --porcelain=v1)" ]; then
+  echo "错误: 工作区不干净；请先提交/清理改动再打 tag。" >&2
+  git status --porcelain=v1 >&2
+  exit 1
+fi
+
+if git show-ref --tags --quiet --verify "refs/tags/$tag"; then
+  echo "错误: 本地已存在 tag: $tag" >&2
+  exit 1
+fi
+
+if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+  echo "错误: 远端已存在 tag: $tag" >&2
+  exit 1
+fi
+
+head_sha="$(git rev-parse --short HEAD)"
+echo "Tag: $tag -> $head_sha"
+
+git push
+git tag -a "$tag" -m "Release $tag"
+git push origin "$tag"
+
+echo "已推送: $tag"
