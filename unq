@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+usage() {
+  echo "用法: $0 [app_path]" >&2
+  echo "默认: /Applications/VSCode-Switcher.app" >&2
+  echo "例子: $0" >&2
+  echo "      $0 /Applications/VSCode-Switcher.app" >&2
+  exit 2
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+fi
+
+app_path="${1:-/Applications/VSCode-Switcher.app}"
+
+if [ ! -d "$app_path" ]; then
+  echo "错误: 找不到应用目录: $app_path" >&2
+  exit 1
+fi
+
+sudo xattr -dr com.apple.quarantine "$app_path"
+echo "已移除 quarantine: $app_path"
+
