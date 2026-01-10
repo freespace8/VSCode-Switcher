@@ -50,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch action {
         case .focusNumber(let number):
             windowSwitcher.handleHotKeyFocusNumber(number)
+            windowSwitcher.showAppWindowOnTopWithoutActivating()
         }
     }
 
@@ -246,12 +247,26 @@ final class VSCodeWindowSwitcher {
         guard let appWindow else { return }
 
         if appWindow.isVisible {
-            appWindow.orderOut(nil)
+            if NSApp.isActive && appWindow.isKeyWindow {
+                appWindow.orderOut(nil)
+                return
+            }
+
+            NSApp.activate(ignoringOtherApps: true)
+            appWindow.makeKeyAndOrderFront(nil)
+            appWindow.orderFrontRegardless()
             return
         }
 
         NSApp.activate(ignoringOtherApps: true)
         appWindow.makeKeyAndOrderFront(nil)
+        appWindow.orderFrontRegardless()
+    }
+
+    func showAppWindowOnTopWithoutActivating() {
+        guard let appWindow else { return }
+        appWindow.level = .normal
+        appWindow.orderFrontRegardless()
     }
 
     func hasAccessibilityPermission() -> Bool {
@@ -679,6 +694,7 @@ final class VSCodeWindowSwitcher {
     private func focusWindow(_ window: AXUIElement, in app: AXUIElement) {
         unminimizeIfNeeded(window)
 
+        _ = AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
         _ = AXUIElementSetAttributeValue(app, kAXFocusedWindowAttribute as CFString, window)
         _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
