@@ -282,6 +282,10 @@ final class VSCodeWindowSwitcher {
         appWindow = window
     }
 
+    func isAppWindowVisible() -> Bool {
+        appWindow?.isVisible == true
+    }
+
     func toggleAppWindowVisibility() {
         guard let appWindow else { return }
 

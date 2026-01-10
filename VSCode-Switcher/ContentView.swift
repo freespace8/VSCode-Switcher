@@ -12,14 +12,19 @@ import AppKit
 @MainActor
 final class VSCodeWindowsViewModel: ObservableObject {
     @Published private(set) var hasAccessibilityPermission: Bool = false
+    @Published private(set) var hasScreenCapturePermission: Bool = false
     @Published private(set) var windows: [VSCodeWindowItem] = []
     @Published private(set) var windowAliases: [String: String] = [:]
     @Published private(set) var diagnosticsText: String = ""
     @Published private(set) var activeWindow: VSCodeWindowItem?
+    @Published private(set) var previewsByWindowID: [String: NSImage] = [:]
+    @Published private(set) var previewStatusByWindowID: [String: String] = [:]
 
     private let switcher: VSCodeWindowSwitcher
     private var activePollTask: Task<Void, Never>?
+    private var previewPollTask: Task<Void, Never>?
     private var notificationObserver: RefreshNotificationObserver?
+    private var visibleWindowIDs = Set<String>()
 
     init(switcher: VSCodeWindowSwitcher? = nil) {
         self.switcher = switcher ?? .shared
@@ -27,10 +32,16 @@ final class VSCodeWindowsViewModel: ObservableObject {
 
     func refresh() {
         hasAccessibilityPermission = switcher.hasAccessibilityPermission()
+        hasScreenCapturePermission = WindowPreview.hasScreenCapturePermission()
         windows = switcher.listOrderedVSCodeWindows()
         windowAliases = switcher.windowAliases()
         diagnosticsText = switcher.diagnosticsSummary()
         activeWindow = switcher.frontmostVSCodeWindow()
+
+        let validIDs = Set(windows.map(\.id))
+        previewsByWindowID = previewsByWindowID.filter { validIDs.contains($0.key) }
+        previewStatusByWindowID = previewStatusByWindowID.filter { validIDs.contains($0.key) }
+        visibleWindowIDs = visibleWindowIDs.intersection(validIDs)
     }
 
     func startActiveWindowPolling() {
@@ -47,6 +58,22 @@ final class VSCodeWindowsViewModel: ObservableObject {
     func stopActiveWindowPolling() {
         activePollTask?.cancel()
         activePollTask = nil
+    }
+
+    func startPreviewPolling() {
+        if previewPollTask != nil { return }
+
+        previewPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                await self?.pollPreviews()
+            }
+        }
+    }
+
+    func stopPreviewPolling() {
+        previewPollTask?.cancel()
+        previewPollTask = nil
     }
 
     func startAutoRefreshObservers() {
@@ -71,6 +98,14 @@ final class VSCodeWindowsViewModel: ObservableObject {
         notificationObserver = nil
     }
 
+    func markVisible(windowID: String) {
+        visibleWindowIDs.insert(windowID)
+    }
+
+    func unmarkVisible(windowID: String) {
+        visibleWindowIDs.remove(windowID)
+    }
+
     func refreshActiveWindow() {
         activeWindow = switcher.frontmostVSCodeWindow()
     }
@@ -87,6 +122,54 @@ final class VSCodeWindowsViewModel: ObservableObject {
         refreshActiveWindow()
     }
 
+    func pollPreviews() async {
+        let windowIDsToCapture = visibleWindowIDs
+
+        hasScreenCapturePermission = WindowPreview.hasScreenCapturePermission()
+        guard hasScreenCapturePermission else {
+            previewsByWindowID = [:]
+            previewStatusByWindowID = Dictionary(uniqueKeysWithValues: windowIDsToCapture.map { ($0, "需要屏幕录制权限") })
+            return
+        }
+
+        guard switcher.isAppWindowVisible() else {
+            return
+        }
+
+        let windowsByID = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
+
+        var newImages = previewsByWindowID
+        var newStatuses = previewStatusByWindowID
+
+        for id in windowIDsToCapture {
+            autoreleasepool {
+                guard let window = windowsByID[id] else {
+                    newImages.removeValue(forKey: id)
+                    newStatuses[id] = "窗口不存在"
+                    return
+                }
+
+                guard let windowNumber = window.windowNumber else {
+                    newImages.removeValue(forKey: id)
+                    newStatuses[id] = "无法获取窗口 ID"
+                    return
+                }
+
+                guard let image = WindowPreview.captureWindowImage(windowID: CGWindowID(windowNumber)) else {
+                    newImages.removeValue(forKey: id)
+                    newStatuses[id] = "无法抓取窗口预览"
+                    return
+                }
+
+                newImages[id] = image
+                newStatuses.removeValue(forKey: id)
+            }
+        }
+
+        previewsByWindowID = newImages
+        previewStatusByWindowID = newStatuses
+    }
+
     func openAccessibilitySettings() {
         switcher.openAccessibilitySettings()
     }
@@ -94,6 +177,15 @@ final class VSCodeWindowsViewModel: ObservableObject {
     func requestAccessibilityPermission() {
         _ = switcher.requestAccessibilityIfNeeded()
         refresh()
+    }
+
+    func requestScreenCapturePermission() {
+        _ = WindowPreview.requestScreenCapturePermission()
+        hasScreenCapturePermission = WindowPreview.hasScreenCapturePermission()
+    }
+
+    func openScreenCaptureSettings() {
+        WindowPreview.openScreenCaptureSettings()
     }
 
     func focus(_ window: VSCodeWindowItem) {
@@ -210,10 +302,12 @@ struct ContentView: View {
         .onAppear {
             viewModel.refresh()
             viewModel.startActiveWindowPolling()
+            viewModel.startPreviewPolling()
             viewModel.startAutoRefreshObservers()
         }
         .onDisappear {
             viewModel.stopActiveWindowPolling()
+            viewModel.stopPreviewPolling()
             viewModel.stopAutoRefreshObservers()
         }
         .onReceive(NotificationCenter.default.publisher(for: .vsCodeSwitcherRequestRefresh)) { _ in
@@ -275,12 +369,34 @@ struct ContentView: View {
 
     private var windowList: some View {
         List {
+            if !viewModel.hasScreenCapturePermission {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("需要屏幕录制权限")
+                        .font(.headline)
+
+                    Text("用于抓取 VSCode 窗口缩略图预览；不授权也不影响窗口切换。")
+                        .foregroundStyle(.secondary)
+
+                    HStack(spacing: 10) {
+                        Button("请求授权") {
+                            viewModel.requestScreenCapturePermission()
+                        }
+                        Button("打开系统设置") {
+                            viewModel.openScreenCaptureSettings()
+                        }
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+
             ForEach(viewModel.windows) { window in
                 let hotKey = hotKeyLabel(for: window)
                 let alias = viewModel.alias(forWindowID: window.id)
                 let displayTitle = alias ?? window.title
                 let shouldShowOriginalTitle = alias != nil && alias != window.title
                 let index = viewModel.windows.firstIndex(where: { $0.id == window.id }) ?? 0
+                let image = viewModel.previewsByWindowID[window.id]
+                let previewStatus = viewModel.previewStatusByWindowID[window.id]
                 HStack(spacing: 10) {
                     Button {
                         viewModel.focus(window)
@@ -354,6 +470,39 @@ struct ContentView: View {
                 }
                 .padding(.vertical, 6)
                 .listRowBackground(isActive(window) ? Color.accentColor.opacity(0.18) : Color.clear)
+                .onAppear {
+                    viewModel.markVisible(windowID: window.id)
+                }
+                .onDisappear {
+                    viewModel.unmarkVisible(windowID: window.id)
+                }
+
+                Group {
+                    if let image {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: .infinity)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(Color.secondary.opacity(0.15), lineWidth: 1)
+                            )
+                    } else {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.secondary.opacity(0.08))
+
+                            Text(previewStatus ?? "预览不可用")
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
+                                .padding(.vertical, 10)
+                                .padding(.horizontal, 12)
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+                .padding(.bottom, 8)
             }
         }
         .animation(.interpolatingSpring(stiffness: 380, damping: 32), value: viewModel.windows)
