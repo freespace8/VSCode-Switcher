@@ -9,10 +9,159 @@ import SwiftUI
 import AppKit
 import Carbon.HIToolbox
 import ApplicationServices
+import Darwin
 import os
 
 extension Notification.Name {
     static let vsCodeSwitcherRequestRefresh = Notification.Name("VSCodeSwitcher.requestRefresh")
+}
+
+final class Diagnostics {
+    static let shared = Diagnostics()
+
+    private static let timestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private let queue = DispatchQueue(label: "com.f8soft.VSCode-Switcher.Diagnostics", qos: .utility)
+    private let maxBytes: Int64 = 1_000_000
+
+    private var fileHandle: FileHandle?
+    private var logURL: URL?
+    private var loggedOnceKeys = Set<String>()
+    private var counters: [String: Int] = [:]
+
+    func startSession(extra: String? = nil) {
+        log("session start\(extra.map { " | \($0)" } ?? "")")
+    }
+
+    func log(_ message: String) {
+        queue.async { [weak self] in
+            self?.writeLine(message)
+        }
+    }
+
+    func logOnce(_ key: String, _ message: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.loggedOnceKeys.insert(key).inserted else { return }
+            self.writeLine(message)
+        }
+    }
+
+    func increment(_ key: String, by delta: Int = 1) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.counters[key, default: 0] += delta
+        }
+    }
+
+    func heartbeat() {
+        queue.async { [weak self] in
+            guard let self else { return }
+
+            if self.counters.isEmpty {
+                self.writeLine("heartbeat")
+                return
+            }
+
+            let pairs = self.counters.keys.sorted().map { key in
+                "\(key)=\(self.counters[key] ?? 0)"
+            }
+            self.writeLine("heartbeat " + pairs.joined(separator: " "))
+        }
+    }
+
+    private func writeLine(_ message: String) {
+        guard let handle = openFileHandle() else {
+            return
+        }
+
+        let ts = Self.timestampFormatter.string(from: Date())
+        let line = "[\(ts)] \(message)\n"
+        guard let data = line.data(using: .utf8) else {
+            return
+        }
+
+        do {
+            try handle.write(contentsOf: data)
+            try handle.synchronize()
+        } catch {
+            return
+        }
+    }
+
+    private func openFileHandle() -> FileHandle? {
+        guard let url = ensureLogURL() else {
+            return nil
+        }
+
+        rotateIfNeeded(url: url)
+
+        if let fileHandle {
+            return fileHandle
+        }
+
+        if !FileManager.default.fileExists(atPath: url.path) {
+            _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+
+        do {
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.seekToEnd()
+            fileHandle = handle
+            return handle
+        } catch {
+            return nil
+        }
+    }
+
+    private func ensureLogURL() -> URL? {
+        if let logURL {
+            return logURL
+        }
+
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+
+        let dir = base.appendingPathComponent("VSCode-Switcher", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            return nil
+        }
+
+        let url = dir.appendingPathComponent("diagnostics.log", isDirectory: false)
+        logURL = url
+        return url
+    }
+
+    private func rotateIfNeeded(url: URL) {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return
+        }
+
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? NSNumber,
+              size.int64Value >= maxBytes else {
+            return
+        }
+
+        do {
+            try fileHandle?.close()
+        } catch {
+            // ignore
+        }
+        fileHandle = nil
+
+        let backupURL = url.appendingPathExtension("1")
+        _ = try? FileManager.default.removeItem(at: backupURL)
+        _ = try? FileManager.default.moveItem(at: url, to: backupURL)
+        _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+    }
 }
 
 @main
@@ -31,8 +180,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKeyManager: HotKeyManager?
     private var statusItem: NSStatusItem?
     private var autoTileMenuItem: NSMenuItem?
+    private var diagnosticsHeartbeatTimer: DispatchSourceTimer?
+    private var sigtermSource: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "-"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "-"
+        Diagnostics.shared.startSession(extra: "version=\(version)(\(build)) pid=\(ProcessInfo.processInfo.processIdentifier) axTrusted=\(AXIsProcessTrusted() ? "true" : "false")")
+        installSigtermHandler()
+        startDiagnosticsHeartbeat()
+
         enforceSingleInstanceOrExit()
 
         windowSwitcher.bootstrap()
@@ -43,6 +200,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKeyManager?.registerDefaultHotKeys()
 
         installStatusItem()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        Diagnostics.shared.log("applicationWillTerminate")
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -68,6 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             _ = existing.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         }
 
+        Diagnostics.shared.log("enforceSingleInstanceOrExit: terminate self (existing instance detected)")
         NSApp.terminate(nil)
     }
 
@@ -77,6 +239,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             windowSwitcher.handleHotKeyFocusNumber(number)
             windowSwitcher.showAppWindowOnTopWithoutActivating()
         }
+    }
+
+    private func startDiagnosticsHeartbeat() {
+        if diagnosticsHeartbeatTimer != nil {
+            return
+        }
+
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(5))
+        timer.setEventHandler {
+            Diagnostics.shared.heartbeat()
+        }
+        timer.resume()
+        diagnosticsHeartbeatTimer = timer
+    }
+
+    private func installSigtermHandler() {
+        if sigtermSource != nil {
+            return
+        }
+
+        signal(SIGTERM, SIG_IGN)
+
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: DispatchQueue.global(qos: .utility))
+        source.setEventHandler {
+            Diagnostics.shared.log("SIGTERM received")
+            DispatchQueue.main.async {
+                NSApp.terminate(nil)
+            }
+        }
+        source.resume()
+        sigtermSource = source
     }
 
     private func installStatusItem() {
@@ -583,6 +777,13 @@ final class VSCodeWindowSwitcher {
         var value: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &value)
         guard result == .success, let window = value else { return nil }
+        guard CFGetTypeID(window) == AXUIElementGetTypeID() else {
+            Diagnostics.shared.logOnce(
+                "frontmostVSCodeWindow.unexpectedType",
+                "frontmostVSCodeWindow: unexpected CFTypeID=\(CFGetTypeID(window)) bundle=\(bundleIdentifier) pid=\(pid)"
+            )
+            return nil
+        }
         let axWindow = unsafeBitCast(window, to: AXUIElement.self)
 
         return VSCodeWindowItem(
@@ -949,8 +1150,18 @@ final class VSCodeWindowSwitcher {
             return nil
         }
 
-        let positionAXValue = positionValue as! AXValue
-        let sizeAXValue = sizeValue as! AXValue
+        let expectedTypeID = AXValueGetTypeID()
+        guard CFGetTypeID(positionValue) == expectedTypeID,
+              CFGetTypeID(sizeValue) == expectedTypeID else {
+            Diagnostics.shared.logOnce(
+                "copyAXFrame.invalidTypes",
+                "copyAXFrame: unexpected CFTypeID position=\(CFGetTypeID(positionValue)) size=\(CFGetTypeID(sizeValue))"
+            )
+            return nil
+        }
+
+        let positionAXValue = unsafeBitCast(positionValue, to: AXValue.self)
+        let sizeAXValue = unsafeBitCast(sizeValue, to: AXValue.self)
 
         var position = CGPoint.zero
         var size = CGSize.zero
@@ -1054,12 +1265,14 @@ final class VSCodeAXWindowMonitor {
 
         for entry in entriesByPID.values {
             _ = AXObserverRemoveNotification(entry.observer, entry.appElement, kAXWindowCreatedNotification as CFString)
+            _ = AXObserverRemoveNotification(entry.observer, entry.appElement, kAXUIElementDestroyedNotification as CFString)
             CFRunLoopRemoveSource(CFRunLoopGetMain(), entry.runLoopSource, .defaultMode)
         }
         entriesByPID.removeAll()
     }
 
     func rebuild() {
+        Diagnostics.shared.increment("ax.monitorRebuild")
         stop()
 
         guard AXIsProcessTrusted() else {

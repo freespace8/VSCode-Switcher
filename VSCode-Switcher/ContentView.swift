@@ -31,6 +31,7 @@ final class VSCodeWindowsViewModel: ObservableObject {
     }
 
     func refresh() {
+        Diagnostics.shared.increment("vm.refresh")
         hasAccessibilityPermission = switcher.hasAccessibilityPermission()
         let isVSCodeFrontmost = switcher.isFrontmostVSCodeApplication()
         let hasRunningVSCode = switcher.hasRunningVSCodeApplication()
@@ -55,6 +56,7 @@ final class VSCodeWindowsViewModel: ObservableObject {
     }
 
     func refreshWindowsListIfChanged() {
+        Diagnostics.shared.increment("vm.refreshIfChanged")
         hasAccessibilityPermission = switcher.hasAccessibilityPermission()
         guard hasAccessibilityPermission else {
             windows = []
@@ -77,6 +79,7 @@ final class VSCodeWindowsViewModel: ObservableObject {
         }
         if newWindows.map(\.id) != windows.map(\.id) {
             windows = newWindows
+            Diagnostics.shared.increment("vm.windowsChanged")
 #if DEBUG
             Self.logger.info("refreshWindowsListIfChanged: windows changed new_count=\(newWindows.count) old_count=\(self.windows.count)")
 #endif
@@ -94,7 +97,8 @@ final class VSCodeWindowsViewModel: ObservableObject {
 
         activePollTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 300_000_000)
+                Diagnostics.shared.increment("vm.pollTick")
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
                 self?.pollPermissionAndActiveWindow()
             }
         }
@@ -120,6 +124,7 @@ final class VSCodeWindowsViewModel: ObservableObject {
 
         if windowMonitor == nil {
             windowMonitor = VSCodeAXWindowMonitor { [weak self] in
+                Diagnostics.shared.increment("ax.monitorEvent")
                 Task { @MainActor [weak self] in
                     self?.lastWindowEventTimestamp = DispatchTime.now().uptimeNanoseconds
                     self?.refreshWindowsListIfChanged()
@@ -131,6 +136,7 @@ final class VSCodeWindowsViewModel: ObservableObject {
         if refreshFallbackTask == nil {
             refreshFallbackTask = Task { [weak self] in
                 while !Task.isCancelled {
+                    Diagnostics.shared.increment("vm.fallbackTick")
                     let interval = await MainActor.run { [weak self] in
                         self?.fallbackRefreshIntervalNanoseconds() ?? 5_000_000_000
                     }
@@ -177,15 +183,37 @@ final class VSCodeWindowsViewModel: ObservableObject {
     }
 
     func handleAutoRefreshNotification(_ notification: Notification) {
-        refreshWindowsListIfChanged()
-
         switch notification.name {
-        case NSWorkspace.didLaunchApplicationNotification,
-             NSWorkspace.didTerminateApplicationNotification:
-            windowMonitor?.rebuild()
+        case NSApplication.didBecomeActiveNotification:
+            Diagnostics.shared.increment("vm.notification.didBecomeActive")
+            refresh()
+
+        case NSWorkspace.didActivateApplicationNotification:
+            Diagnostics.shared.increment("vm.notification.didActivate")
+            refreshActiveWindow()
+
+        case NSWorkspace.didLaunchApplicationNotification:
+            Diagnostics.shared.increment("vm.notification.didLaunch")
+            handleWorkspaceLaunchOrTerminate(notification)
+
+        case NSWorkspace.didTerminateApplicationNotification:
+            Diagnostics.shared.increment("vm.notification.didTerminate")
+            handleWorkspaceLaunchOrTerminate(notification)
+
         default:
             break
         }
+    }
+
+    private func handleWorkspaceLaunchOrTerminate(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              let bundleIdentifier = app.bundleIdentifier,
+              VSCodeWindowSwitcher.supportedBundleIdentifiers.contains(bundleIdentifier) else {
+            return
+        }
+
+        refreshWindowsListIfChanged()
+        windowMonitor?.rebuild()
     }
 
     private func fallbackRefreshIntervalNanoseconds() -> UInt64 {
@@ -194,9 +222,9 @@ final class VSCodeWindowsViewModel: ObservableObject {
         let now = DispatchTime.now().uptimeNanoseconds
         let elapsed = now &- lastWindowEventTimestamp
         if elapsed <= 2_000_000_000 {
-            return 100_000_000 // 0.1s
+            return 250_000_000 // 0.25s
         }
-        return 1_000_000_000 // 1s
+        return 5_000_000_000 // 5s
     }
 
     func openAccessibilitySettings() {
