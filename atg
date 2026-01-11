@@ -2,9 +2,11 @@
 set -eu
 
 usage() {
-  echo "用法: $0 <tag>" >&2
+  echo "用法: $0 [tag]" >&2
+  echo "说明: 不传 tag 时，自动取最新版本并生成下一版本（vMAJOR.MINOR[.PATCH]，按 0-9 进位）" >&2
   echo "例子: $0 0.1.0    (会创建并推送 v0.1.0)" >&2
   echo "      $0 v0.1.0  (直接使用 v0.1.0)" >&2
+  echo "      $0         (自动生成并推送下一版本)" >&2
   exit 2
 }
 
@@ -12,21 +14,85 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   usage
 fi
 
-input_tag="${1:-}"
-if [ -z "$input_tag" ]; then
-  usage
-fi
-
-case "$input_tag" in
-  v*) tag="$input_tag" ;;
-  *) tag="v$input_tag" ;;
-esac
-
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   echo "错误: 当前目录不在 git 仓库内。" >&2
   exit 1
 }
 cd "$repo_root"
+
+compute_next_tag_from_latest() {
+  latest_input=""
+  major=""
+  minor=""
+  patch=""
+
+  git tag -l 'v*' --sort=-version:refname | while IFS= read -r t; do
+    case "$t" in
+      v*) : ;;
+      *) continue ;;
+    esac
+
+    v="${t#v}"
+    IFS=.
+    set -- $v
+    IFS=' '
+
+    case "$#" in
+      2)
+        a="${1:-}"
+        b="${2:-}"
+        c="0"
+        ;;
+      3)
+        a="${1:-}"
+        b="${2:-}"
+        c="${3:-}"
+        ;;
+      *)
+        continue
+        ;;
+    esac
+
+    case "$a" in ''|*[!0-9]*) continue ;; esac
+    case "$b" in ''|*[!0-9]*) continue ;; esac
+    case "$c" in ''|*[!0-9]*) continue ;; esac
+
+    printf '%s|%s|%s|%s\n' "$t" "$a" "$b" "$c"
+    break
+  done | {
+    IFS='|' read -r latest_input major minor patch || true
+
+    if [ -z "${latest_input:-}" ]; then
+      echo "错误: 未找到可解析版本 tag（仅支持 vMAJOR.MINOR 或 vMAJOR.MINOR.PATCH）。" >&2
+      exit 1
+    fi
+
+    if [ "$patch" -lt 9 ]; then
+      patch=$((patch + 1))
+    else
+      patch=0
+      minor=$((minor + 1))
+      if [ "$minor" -ge 10 ]; then
+        minor=0
+        major=$((major + 1))
+      fi
+    fi
+
+    next="v${major}.${minor}.${patch}"
+    echo "Latest: ${latest_input} -> Next: ${next}"
+    echo "$next"
+  }
+}
+
+input_tag="${1:-}"
+if [ -z "$input_tag" ]; then
+  tag="$(compute_next_tag_from_latest | tail -n 1)"
+else
+  case "$input_tag" in
+    v*) tag="$input_tag" ;;
+    *) tag="v$input_tag" ;;
+  esac
+fi
 
 if ! git remote get-url origin >/dev/null 2>&1; then
   echo "错误: 未配置 origin 远端。" >&2
