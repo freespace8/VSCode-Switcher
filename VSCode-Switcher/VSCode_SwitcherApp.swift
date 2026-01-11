@@ -49,6 +49,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        windowSwitcher.handleAppDidBecomeActive()
+    }
+
     private func enforceSingleInstanceOrExit() {
         guard let bundleIdentifier = Bundle.main.bundleIdentifier else {
             return
@@ -245,6 +249,7 @@ final class HotKeyManager {
 final class VSCodeWindowSwitcher {
     static let shared = VSCodeWindowSwitcher()
     private static let logger = Logger(subsystem: "com.f8soft.VSCode-Switcher", category: "AX")
+    private static let debugLogger = Logger(subsystem: "com.f8soft.VSCode-Switcher", category: "Debug")
     static let supportedBundleIdentifiers: [String] = [
         "com.microsoft.VSCode",
     ]
@@ -257,10 +262,11 @@ final class VSCodeWindowSwitcher {
         static let userDefaultsWindowAliasesKey = "VSCodeSwitcher.windowAliases"
         static let userDefaultsAutoTileKey = "VSCodeSwitcher.autoTile"
         static let userDefaultsSidebarWidthKey = "VSCodeSwitcher.sidebarWidth"
+        static let userDefaultsLastActiveSlotIndexKey = "VSCodeSwitcher.lastActiveSlotIndex"
 
     }
 
-    private struct WindowBookmark: Codable {
+    private struct WindowBookmark: Codable, Equatable {
         var bundleIdentifier: String
         var windowNumber: Int?
         var title: String?
@@ -284,27 +290,102 @@ final class VSCodeWindowSwitcher {
     func toggleAppWindowVisibility() {
         guard let appWindow else { return }
 
+#if DEBUG
+        let frontmostBefore = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "-"
+        Self.debugLogger.info("toggleAppWindowVisibility: begin visible=\(appWindow.isVisible) key=\(appWindow.isKeyWindow) nsapp_active=\(NSApp.isActive) frontmost=\(frontmostBefore, privacy: .public)")
+#endif
+
         if appWindow.isVisible {
             if NSApp.isActive && appWindow.isKeyWindow {
                 appWindow.orderOut(nil)
                 return
             }
 
-            NSApp.activate(ignoringOtherApps: true)
-            appWindow.makeKeyAndOrderFront(nil)
-            appWindow.orderFrontRegardless()
+            focusVSCodeAlongsideAppWindowIfPossible()
+            showAppWindowOnTopWithoutActivating()
             return
         }
 
-        NSApp.activate(ignoringOtherApps: true)
-        appWindow.makeKeyAndOrderFront(nil)
-        appWindow.orderFrontRegardless()
+        focusVSCodeAlongsideAppWindowIfPossible()
+        showAppWindowOnTopWithoutActivating()
+    }
+
+    func handleAppDidBecomeActive() {
+        guard let appWindow else { return }
+
+#if DEBUG
+        let frontmostBefore = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "-"
+        Self.debugLogger.info("handleAppDidBecomeActive: begin appWindow_visible=\(appWindow.isVisible) frontmost=\(frontmostBefore, privacy: .public)")
+#endif
+
+        focusVSCodeAlongsideAppWindowIfPossible()
+        showAppWindowOnTopWithoutActivating()
     }
 
     func showAppWindowOnTopWithoutActivating() {
         guard let appWindow else { return }
         appWindow.level = .normal
         appWindow.orderFrontRegardless()
+#if DEBUG
+        let frontmostAfter = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "-"
+        Self.debugLogger.info("showAppWindowOnTopWithoutActivating: done frontmost=\(frontmostAfter, privacy: .public)")
+#endif
+    }
+
+    private func focusVSCodeAlongsideAppWindowIfPossible() {
+        guard ensureAccessibilityPermission(prompt: false) else { return }
+
+#if DEBUG
+        Self.debugLogger.info("focusVSCodeAlongsideAppWindowIfPossible: begin")
+#endif
+
+        if let slotIndex = loadLastActiveSlotIndex() {
+            let ordered = listOrderedVSCodeWindows(allowActivate: true)
+            if !ordered.isEmpty {
+                let clampedIndex = min(max(slotIndex, 0), ordered.count - 1)
+#if DEBUG
+                Self.debugLogger.info("focusVSCodeAlongsideAppWindowIfPossible: focusing by slotIndex=\(slotIndex) clamped=\(clampedIndex) windows=\(ordered.count)")
+#endif
+                focus(window: ordered[clampedIndex])
+#if DEBUG
+                let frontmostAfter = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "-"
+                Self.debugLogger.info("focusVSCodeAlongsideAppWindowIfPossible: after slotIndex focus frontmost=\(frontmostAfter, privacy: .public)")
+#endif
+                return
+            }
+        }
+
+        if let first = listOrderedVSCodeWindows(allowActivate: true).first {
+#if DEBUG
+            Self.debugLogger.info("focusVSCodeAlongsideAppWindowIfPossible: focused first ordered window")
+#endif
+            focus(window: first)
+            return
+        }
+
+#if DEBUG
+        Self.debugLogger.info("focusVSCodeAlongsideAppWindowIfPossible: no windows; activating app only")
+#endif
+        runningVSCodeApplication()?.activate(options: [.activateAllWindows])
+    }
+
+    func isFrontmostVSCodeApplication() -> Bool {
+        guard let frontmost = NSWorkspace.shared.frontmostApplication,
+              let bundleIdentifier = frontmost.bundleIdentifier else {
+            return false
+        }
+        return Self.supportedBundleIdentifiers.contains(bundleIdentifier)
+    }
+
+    func hasRunningVSCodeApplication() -> Bool {
+        runningVSCodeApplication() != nil
+    }
+
+    func rememberLastActiveWindow(_ window: VSCodeWindowItem?) {
+        guard let window else { return }
+#if DEBUG
+        Self.debugLogger.info("rememberLastActiveWindow: bundle=\(window.bundleIdentifier, privacy: .public) pid=\(window.pid) title=\(window.title, privacy: .public)")
+#endif
     }
 
     func hasAccessibilityPermission() -> Bool {
@@ -513,6 +594,15 @@ final class VSCodeWindowSwitcher {
         )
     }
 
+    func rememberLastActiveSlotIndex(_ slotIndex: Int?) {
+        guard let slotIndex else { return }
+        guard slotIndex >= 0 else { return }
+        UserDefaults.standard.set(slotIndex, forKey: Constants.userDefaultsLastActiveSlotIndexKey)
+#if DEBUG
+        Self.debugLogger.info("rememberLastActiveSlotIndex: slotIndex=\(slotIndex)")
+#endif
+    }
+
     func focus(window: VSCodeWindowItem) {
         guard ensureAccessibilityPermission(prompt: false) else {
             return
@@ -543,6 +633,8 @@ final class VSCodeWindowSwitcher {
 
         focusWindow(targetWindow, in: axApp)
     }
+
+
 
     func handleHotKeyFocusNumber(_ number: Int) {
         guard (0...9).contains(number) else { return }
@@ -926,6 +1018,11 @@ final class VSCodeWindowSwitcher {
             return [:]
         }
         return (try? JSONDecoder().decode([Int: WindowBookmark].self, from: data)) ?? [:]
+    }
+
+    private func loadLastActiveSlotIndex() -> Int? {
+        let value = UserDefaults.standard.object(forKey: Constants.userDefaultsLastActiveSlotIndexKey)
+        return value as? Int
     }
 }
 

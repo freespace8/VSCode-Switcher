@@ -8,9 +8,11 @@
 import SwiftUI
 import Combine
 import AppKit
+import os
 
 @MainActor
 final class VSCodeWindowsViewModel: ObservableObject {
+    private static let logger = Logger(subsystem: "com.f8soft.VSCode-Switcher", category: "Debug")
     @Published private(set) var hasAccessibilityPermission: Bool = false
     @Published private(set) var windows: [VSCodeWindowItem] = []
     @Published private(set) var windowAliases: [String: String] = [:]
@@ -30,10 +32,26 @@ final class VSCodeWindowsViewModel: ObservableObject {
 
     func refresh() {
         hasAccessibilityPermission = switcher.hasAccessibilityPermission()
-        windows = switcher.listOrderedVSCodeWindows(allowActivate: false)
+        let isVSCodeFrontmost = switcher.isFrontmostVSCodeApplication()
+        let hasRunningVSCode = switcher.hasRunningVSCodeApplication()
+        let newWindows = switcher.listOrderedVSCodeWindows(allowActivate: false)
+        if !newWindows.isEmpty || isVSCodeFrontmost || !hasRunningVSCode {
+            windows = newWindows
+#if DEBUG
+            Self.logger.info("refresh: windows updated count=\(newWindows.count)")
+#endif
+        } else {
+#if DEBUG
+            Self.logger.info("refresh: windows kept old_count=\(self.windows.count) new_empty while VSCode not frontmost")
+#endif
+        }
         windowAliases = switcher.windowAliases()
         diagnosticsText = switcher.diagnosticsSummary()
         activeWindow = switcher.frontmostVSCodeWindow()
+        switcher.rememberLastActiveWindow(activeWindow)
+        if isVSCodeFrontmost, let activeWindow, let idx = switcher.slotIndexForWindowID(activeWindow.id, limit: 1000) {
+            switcher.rememberLastActiveSlotIndex(idx)
+        }
     }
 
     func refreshWindowsListIfChanged() {
@@ -44,12 +62,31 @@ final class VSCodeWindowsViewModel: ObservableObject {
             return
         }
 
+        let isVSCodeFrontmost = switcher.isFrontmostVSCodeApplication()
         let newWindows = switcher.listOrderedVSCodeWindows(allowActivate: false)
+        if newWindows.isEmpty && !windows.isEmpty && !isVSCodeFrontmost {
+#if DEBUG
+            Self.logger.info("refreshWindowsListIfChanged: skip clearing windows old_count=\(self.windows.count) (new empty; VSCode not frontmost)")
+#endif
+            activeWindow = switcher.frontmostVSCodeWindow()
+            switcher.rememberLastActiveWindow(activeWindow)
+            if isVSCodeFrontmost, let activeWindow, let idx = switcher.slotIndexForWindowID(activeWindow.id, limit: 1000) {
+                switcher.rememberLastActiveSlotIndex(idx)
+            }
+            return
+        }
         if newWindows.map(\.id) != windows.map(\.id) {
             windows = newWindows
+#if DEBUG
+            Self.logger.info("refreshWindowsListIfChanged: windows changed new_count=\(newWindows.count) old_count=\(self.windows.count)")
+#endif
         }
 
         activeWindow = switcher.frontmostVSCodeWindow()
+        switcher.rememberLastActiveWindow(activeWindow)
+        if isVSCodeFrontmost, let activeWindow, let idx = switcher.slotIndexForWindowID(activeWindow.id, limit: 1000) {
+            switcher.rememberLastActiveSlotIndex(idx)
+        }
     }
 
     func startActiveWindowPolling() {
@@ -119,7 +156,12 @@ final class VSCodeWindowsViewModel: ObservableObject {
     }
 
     func refreshActiveWindow() {
+        let isVSCodeFrontmost = switcher.isFrontmostVSCodeApplication()
         activeWindow = switcher.frontmostVSCodeWindow()
+        switcher.rememberLastActiveWindow(activeWindow)
+        if isVSCodeFrontmost, let activeWindow, let idx = switcher.slotIndexForWindowID(activeWindow.id, limit: 1000) {
+            switcher.rememberLastActiveSlotIndex(idx)
+        }
     }
 
     func pollPermissionAndActiveWindow() {
