@@ -7,7 +7,8 @@ macOS 菜单栏小工具：列出并快速切换 Visual Studio Code（VSCode）�
 - 全局快捷键：⌃⌥1..9 / ⌃⌥0（按列表顺序，最多 10 个窗口；0=第 10 个）
 - 窗口排序（持久化）
 - 窗口别名（持久化）
-- 可选：聚焦后自动平铺（状态栏开关）
+- 多屏支持：通过“点击列表/快捷键”切换时，将被激活的 VSCode 窗口移动到 VSCode-Switcher 所在屏幕
+- 可选：激活后自动平铺（同一屏幕占满：工具窗口左、VSCode 右）
 
 ## 安装
 1. 从 GitHub Releases 下载 DMG：`https://github.com/freespace8/VSCode-Switcher/releases`
@@ -35,7 +36,7 @@ macOS 菜单栏小工具：列出并快速切换 Visual Studio Code（VSCode）�
 - 状态栏菜单：显示/隐藏、刷新窗口列表、激活后自动平铺、打开辅助功能设置、退出
 - 排序：点击“排序”进入模式 → 使用“上移/下移” → 点击“完成”
 - 别名：右键窗口 → “编辑别名”/“清空别名”
-- 自动平铺：状态栏菜单切换“激活后自动平铺”
+- 多屏：将 VSCode-Switcher 主窗口放到目标屏幕，通过点击/⌃⌥数字切换窗口即可
 
 ## 限制
 - 仅支持 VSCode（bundle id：`com.microsoft.VSCode`），不包含 Insiders 等变体

@@ -761,55 +761,58 @@ final class VSCodeWindowSwitcher {
         _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
 
-        tileAfterFocusing(vsCodeWindow: window)
+        moveToAppWindowScreenIfNeeded(window)
+        tileAfterFocusingIfEnabled(vsCodeWindow: window)
     }
 
-    private func tileAfterFocusing(vsCodeWindow: AXUIElement) {
-        guard isAutoTileEnabled else {
-            return
-        }
+    private func tileAfterFocusingIfEnabled(vsCodeWindow: AXUIElement) {
+        guard isAutoTileEnabled else { return }
+        guard let targetScreen = appWindow?.screen else { return }
 
-        guard let targetFrames = computeTilingFrames() else {
-            return
-        }
+        let screenFrame = targetScreen.frame
+        guard screenFrame.width > 0, screenFrame.height > 0 else { return }
+
+        let sidebarWidth = computeSidebarWidth(in: screenFrame)
+        let appFrame = CGRect(x: screenFrame.minX, y: screenFrame.minY, width: sidebarWidth, height: screenFrame.height)
+        let codeFrame = CGRect(
+            x: screenFrame.minX + sidebarWidth,
+            y: screenFrame.minY,
+            width: max(0, screenFrame.width - sidebarWidth),
+            height: screenFrame.height
+        )
 
         if let appWindow {
-            appWindow.setFrame(targetFrames.appWindowFrame, display: true, animate: false)
+            appWindow.setFrame(appFrame, display: true, animate: false)
         }
 
-        setAXFrame(window: vsCodeWindow, frame: targetFrames.vsCodeFrame)
+        setAXFrame(window: vsCodeWindow, frame: codeFrame)
     }
 
-    private func computeTilingFrames() -> (appWindowFrame: CGRect, vsCodeFrame: CGRect)? {
-        let screens = NSScreen.screens
-        guard let primaryScreen = NSScreen.main ?? screens.first else {
-            return nil
+    private func moveToAppWindowScreenIfNeeded(_ window: AXUIElement) {
+        guard let targetScreen = appWindow?.screen else {
+            return
         }
-
-        let appScreen = appWindow?.screen ?? primaryScreen
-        let visible = appScreen.visibleFrame
+        let visible = targetScreen.visibleFrame
         guard visible.width > 0, visible.height > 0 else {
-            return nil
+            return
         }
 
-        let sidebarWidth = computeSidebarWidth(in: visible)
-
-        if screens.count <= 1 {
-            let full = appScreen.frame
-            let appFrame = CGRect(x: visible.minX, y: visible.minY, width: sidebarWidth, height: visible.height)
-            let codeFrame = CGRect(x: full.minX + sidebarWidth, y: full.minY, width: max(0, full.width - sidebarWidth), height: full.height)
-            return (appFrame, codeFrame)
+        guard let windowFrame = copyAXFrame(from: window) else {
+            return
         }
 
-        let codeScreen = screens.first(where: { $0 !== appScreen }) ?? appScreen
-        let codeFull = codeScreen.frame
-        guard codeFull.width > 0, codeFull.height > 0 else {
-            return nil
+        let center = CGPoint(x: windowFrame.midX, y: windowFrame.midY)
+        let currentScreen = NSScreen.screens.first(where: { $0.frame.contains(center) })
+        if currentScreen === targetScreen {
+            return
         }
 
-        let appFrame = CGRect(x: visible.minX, y: visible.minY, width: sidebarWidth, height: visible.height)
-        let codeFrame = CGRect(x: codeFull.minX, y: codeFull.minY, width: codeFull.width, height: codeFull.height)
-        return (appFrame, codeFrame)
+        var target = windowFrame
+        target.origin.x = visible.maxX - target.width
+        target.origin.y = windowFrame.minY
+        target = clampRect(target, into: visible)
+
+        setAXFrame(window: window, frame: target)
     }
 
     private func computeSidebarWidth(in visibleFrame: CGRect) -> CGFloat {
@@ -817,6 +820,57 @@ final class VSCodeWindowSwitcher {
         let stored = defaults.object(forKey: Constants.userDefaultsSidebarWidthKey) as? Double
         let requested = stored.map { CGFloat($0) } ?? 320
         return min(max(220, requested), visibleFrame.width * 0.5)
+    }
+
+    private func clampRect(_ rect: CGRect, into container: CGRect) -> CGRect {
+        guard rect.width > 0, rect.height > 0, container.width > 0, container.height > 0 else {
+            return rect
+        }
+
+        var clamped = rect
+        let maxX = container.maxX - rect.width
+        let maxY = container.maxY - rect.height
+
+        if maxX < container.minX {
+            clamped.origin.x = container.minX
+        } else {
+            clamped.origin.x = min(max(rect.minX, container.minX), maxX)
+        }
+
+        if maxY < container.minY {
+            clamped.origin.y = container.minY
+        } else {
+            clamped.origin.y = min(max(rect.minY, container.minY), maxY)
+        }
+
+        return clamped
+    }
+
+    private func copyAXFrame(from window: AXUIElement) -> CGRect? {
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
+              let positionValue,
+              let sizeValue else {
+            return nil
+        }
+
+        let positionAXValue = positionValue as! AXValue
+        let sizeAXValue = sizeValue as! AXValue
+
+        var position = CGPoint.zero
+        var size = CGSize.zero
+
+        guard AXValueGetValue(positionAXValue, .cgPoint, &position),
+              AXValueGetValue(sizeAXValue, .cgSize, &size),
+              size.width > 0,
+              size.height > 0 else {
+            return nil
+        }
+
+        return CGRect(origin: position, size: size)
     }
 
     private func setAXFrame(window: AXUIElement, frame: CGRect) {
