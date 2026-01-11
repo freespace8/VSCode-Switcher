@@ -245,12 +245,11 @@ final class HotKeyManager {
 final class VSCodeWindowSwitcher {
     static let shared = VSCodeWindowSwitcher()
     private static let logger = Logger(subsystem: "com.f8soft.VSCode-Switcher", category: "AX")
+    static let supportedBundleIdentifiers: [String] = [
+        "com.microsoft.VSCode",
+    ]
 
     private enum Constants {
-        static let supportedBundleIdentifiers: [String] = [
-            "com.microsoft.VSCode",
-        ]
-
         static let userDefaultsNumberMappingKey = "VSCodeSwitcher.numberMapping"
         static let axWindowNumberAttribute: CFString = "AXWindowNumber" as CFString
         static let accessibilityAlertShownKey = "VSCodeSwitcher.accessibilityAlertShown"
@@ -319,21 +318,21 @@ final class VSCodeWindowSwitcher {
         NSWorkspace.shared.open(url)
     }
 
-    func listOpenVSCodeWindows() -> [VSCodeWindowItem] {
+    func listOpenVSCodeWindows(allowActivate: Bool) -> [VSCodeWindowItem] {
         guard ensureAccessibilityPermission(prompt: false) else {
             return []
         }
 
         var items: [VSCodeWindowItem] = []
 
-        for bundleIdentifier in Constants.supportedBundleIdentifiers {
+        for bundleIdentifier in Self.supportedBundleIdentifiers {
             let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
             for app in runningApps {
                 let pid = app.processIdentifier
                 let axApp = AXUIElementCreateApplication(pid)
 
                 var windowsInfo = copyWindowsWithError(from: axApp)
-                if windowsInfo.error == .cannotComplete {
+                if allowActivate, windowsInfo.error == .cannotComplete {
                     Self.logger.info("AXWindows cannotComplete; retry after activate. pid=\(pid) bundle=\(bundleIdentifier, privacy: .public)")
 #if DEBUG
                     NSLog("AXWindows cannotComplete; retry after activate. pid=%d bundle=%@", pid, bundleIdentifier)
@@ -376,8 +375,8 @@ final class VSCodeWindowSwitcher {
         return items
     }
 
-    func listOrderedVSCodeWindows() -> [VSCodeWindowItem] {
-        let windows = listOpenVSCodeWindows()
+    func listOrderedVSCodeWindows(allowActivate: Bool) -> [VSCodeWindowItem] {
+        let windows = listOpenVSCodeWindows(allowActivate: allowActivate)
         var order = loadWindowOrder()
 
         if order.isEmpty {
@@ -413,6 +412,7 @@ final class VSCodeWindowSwitcher {
         var knownIDs = Set(order)
         knownIDs.reserveCapacity(order.count + windows.count)
 
+        // 新发现窗口统一追加到末尾，避免影响已有窗口的相对顺序（位置/快捷键）
         for window in windows where !knownIDs.contains(window.id) {
             order.append(window.id)
             knownIDs.insert(window.id)
@@ -471,7 +471,7 @@ final class VSCodeWindowSwitcher {
             lines.append("frontmost: \(frontmost.localizedName ?? "-") (\(frontmost.bundleIdentifier ?? "-")) pid=\(frontmost.processIdentifier)")
         }
 
-        for bundleIdentifier in Constants.supportedBundleIdentifiers {
+        for bundleIdentifier in Self.supportedBundleIdentifiers {
             let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
             lines.append("\(bundleIdentifier): running=\(runningApps.count)")
 
@@ -492,7 +492,7 @@ final class VSCodeWindowSwitcher {
         guard ensureAccessibilityPermission(prompt: false) else { return nil }
         guard let frontmost = NSWorkspace.shared.frontmostApplication,
               let bundleIdentifier = frontmost.bundleIdentifier,
-              Constants.supportedBundleIdentifiers.contains(bundleIdentifier) else {
+              Self.supportedBundleIdentifiers.contains(bundleIdentifier) else {
             return nil
         }
 
@@ -549,7 +549,7 @@ final class VSCodeWindowSwitcher {
         guard ensureAccessibilityPermission(prompt: false) else { return }
 
         let slotIndex = number == 0 ? 9 : (number - 1)
-        let ordered = listOrderedVSCodeWindows()
+        let ordered = listOrderedVSCodeWindows(allowActivate: true)
         guard ordered.indices.contains(slotIndex) else { return }
         focus(window: ordered[slotIndex])
     }
@@ -663,7 +663,7 @@ final class VSCodeWindowSwitcher {
     }
 
     private func runningVSCodeApplication() -> NSRunningApplication? {
-        for bundleIdentifier in Constants.supportedBundleIdentifiers {
+        for bundleIdentifier in Self.supportedBundleIdentifiers {
             if let app = runningApplication(bundleIdentifier: bundleIdentifier) {
                 return app
             }
@@ -926,6 +926,106 @@ final class VSCodeWindowSwitcher {
             return [:]
         }
         return (try? JSONDecoder().decode([Int: WindowBookmark].self, from: data)) ?? [:]
+    }
+}
+
+final class VSCodeAXWindowMonitor {
+    typealias OnChange = () -> Void
+
+    private struct Entry {
+        let pid: pid_t
+        let observer: AXObserver
+        let appElement: AXUIElement
+        let runLoopSource: CFRunLoopSource
+    }
+
+    private let onChange: OnChange
+    private var entriesByPID: [pid_t: Entry] = [:]
+    private var debounceWorkItem: DispatchWorkItem?
+
+    init(onChange: @escaping OnChange) {
+        self.onChange = onChange
+    }
+
+    func start() {
+        rebuild()
+    }
+
+    func stop() {
+        debounceWorkItem?.cancel()
+        debounceWorkItem = nil
+
+        for entry in entriesByPID.values {
+            _ = AXObserverRemoveNotification(entry.observer, entry.appElement, kAXWindowCreatedNotification as CFString)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), entry.runLoopSource, .defaultMode)
+        }
+        entriesByPID.removeAll()
+    }
+
+    func rebuild() {
+        stop()
+
+        guard AXIsProcessTrusted() else {
+            return
+        }
+
+        for pid in Self.runningVSCodePIDs() {
+            installObserver(for: pid)
+        }
+    }
+
+    private static func runningVSCodePIDs() -> [pid_t] {
+        var result: [pid_t] = []
+        for bundleIdentifier in VSCodeWindowSwitcher.supportedBundleIdentifiers {
+            let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+            result.append(contentsOf: apps.map(\.processIdentifier))
+        }
+        return result
+    }
+
+    private func installObserver(for pid: pid_t) {
+        var observer: AXObserver?
+        let selfPointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+
+        let error = AXObserverCreate(pid, Self.axCallback, &observer)
+        guard error == .success, let observer else {
+            return
+        }
+
+        let runLoopSource = AXObserverGetRunLoopSource(observer)
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .defaultMode)
+
+        let appElement = AXUIElementCreateApplication(pid)
+        let createdResult = AXObserverAddNotification(observer, appElement, kAXWindowCreatedNotification as CFString, selfPointer)
+        if createdResult != .success {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .defaultMode)
+            return
+        }
+
+        // 不是所有应用都可靠支持销毁通知；失败就静默降级，交给兜底刷新补齐。
+        _ = AXObserverAddNotification(observer, appElement, kAXUIElementDestroyedNotification as CFString, selfPointer)
+
+        entriesByPID[pid] = Entry(pid: pid, observer: observer, appElement: appElement, runLoopSource: runLoopSource)
+    }
+
+    private func handleAXNotification() {
+        scheduleChange()
+    }
+
+    private func scheduleChange() {
+        debounceWorkItem?.cancel()
+
+        let work = DispatchWorkItem { [onChange] in
+            onChange()
+        }
+        debounceWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
+    }
+
+    private static let axCallback: AXObserverCallback = { _, _, _, userData in
+        guard let userData else { return }
+        let monitor = Unmanaged<VSCodeAXWindowMonitor>.fromOpaque(userData).takeUnretainedValue()
+        monitor.handleAXNotification()
     }
 }
 

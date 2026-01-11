@@ -20,6 +20,9 @@ final class VSCodeWindowsViewModel: ObservableObject {
     private let switcher: VSCodeWindowSwitcher
     private var activePollTask: Task<Void, Never>?
     private var notificationObserver: RefreshNotificationObserver?
+    private var refreshFallbackTask: Task<Void, Never>?
+    private var windowMonitor: VSCodeAXWindowMonitor?
+    private var lastWindowEventTimestamp: UInt64 = 0
 
     init(switcher: VSCodeWindowSwitcher? = nil) {
         self.switcher = switcher ?? .shared
@@ -27,9 +30,25 @@ final class VSCodeWindowsViewModel: ObservableObject {
 
     func refresh() {
         hasAccessibilityPermission = switcher.hasAccessibilityPermission()
-        windows = switcher.listOrderedVSCodeWindows()
+        windows = switcher.listOrderedVSCodeWindows(allowActivate: false)
         windowAliases = switcher.windowAliases()
         diagnosticsText = switcher.diagnosticsSummary()
+        activeWindow = switcher.frontmostVSCodeWindow()
+    }
+
+    func refreshWindowsListIfChanged() {
+        hasAccessibilityPermission = switcher.hasAccessibilityPermission()
+        guard hasAccessibilityPermission else {
+            windows = []
+            activeWindow = nil
+            return
+        }
+
+        let newWindows = switcher.listOrderedVSCodeWindows(allowActivate: false)
+        if newWindows.map(\.id) != windows.map(\.id) {
+            windows = newWindows
+        }
+
         activeWindow = switcher.frontmostVSCodeWindow()
     }
 
@@ -61,6 +80,30 @@ final class VSCodeWindowsViewModel: ObservableObject {
         workspaceCenter.addObserver(observer, selector: #selector(RefreshNotificationObserver.handle(_:)), name: NSWorkspace.didTerminateApplicationNotification, object: nil)
 
         NotificationCenter.default.addObserver(observer, selector: #selector(RefreshNotificationObserver.handle(_:)), name: NSApplication.didBecomeActiveNotification, object: nil)
+
+        if windowMonitor == nil {
+            windowMonitor = VSCodeAXWindowMonitor { [weak self] in
+                Task { @MainActor [weak self] in
+                    self?.lastWindowEventTimestamp = DispatchTime.now().uptimeNanoseconds
+                    self?.refreshWindowsListIfChanged()
+                }
+            }
+        }
+        windowMonitor?.start()
+
+        if refreshFallbackTask == nil {
+            refreshFallbackTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    let interval = await MainActor.run { [weak self] in
+                        self?.fallbackRefreshIntervalNanoseconds() ?? 5_000_000_000
+                    }
+                    try? await Task.sleep(nanoseconds: interval)
+                    await MainActor.run { [weak self] in
+                        self?.refreshWindowsListIfChanged()
+                    }
+                }
+            }
+        }
     }
 
     func stopAutoRefreshObservers() {
@@ -69,6 +112,10 @@ final class VSCodeWindowsViewModel: ObservableObject {
         NSWorkspace.shared.notificationCenter.removeObserver(observer)
         NotificationCenter.default.removeObserver(observer)
         notificationObserver = nil
+
+        windowMonitor?.stop()
+        refreshFallbackTask?.cancel()
+        refreshFallbackTask = nil
     }
 
     func refreshActiveWindow() {
@@ -85,6 +132,29 @@ final class VSCodeWindowsViewModel: ObservableObject {
         }
 
         refreshActiveWindow()
+    }
+
+    func handleAutoRefreshNotification(_ notification: Notification) {
+        refreshWindowsListIfChanged()
+
+        switch notification.name {
+        case NSWorkspace.didLaunchApplicationNotification,
+             NSWorkspace.didTerminateApplicationNotification:
+            windowMonitor?.rebuild()
+        default:
+            break
+        }
+    }
+
+    private func fallbackRefreshIntervalNanoseconds() -> UInt64 {
+        // 关闭窗口未必能稳定收到 AX 销毁通知；事件发生后短时间提高兜底刷新频率，加快最终一致。
+        // 常态保持低频（5s），避免持续耗电/占用。
+        let now = DispatchTime.now().uptimeNanoseconds
+        let elapsed = now &- lastWindowEventTimestamp
+        if elapsed <= 2_000_000_000 {
+            return 100_000_000 // 0.1s
+        }
+        return 1_000_000_000 // 1s
     }
 
     func openAccessibilitySettings() {
@@ -169,7 +239,7 @@ private final class RefreshNotificationObserver: NSObject {
     }
 
     @objc func handle(_ notification: Notification) {
-        viewModel?.refresh()
+        viewModel?.handleAutoRefreshNotification(notification)
     }
 }
 
@@ -293,7 +363,8 @@ struct ContentView: View {
                         HStack(spacing: 0) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(displayTitle)
-                                    .lineLimit(1)
+                                    .lineLimit(nil)
+                                    .fixedSize(horizontal: false, vertical: true)
 
                                 if !hotKey.isEmpty || shouldShowOriginalTitle {
                                     HStack(spacing: 8) {
@@ -301,13 +372,15 @@ struct ContentView: View {
                                             Text(hotKey)
                                                 .font(.system(.caption, design: .monospaced))
                                                 .foregroundStyle(.secondary)
-                                                .lineLimit(1)
+                                                .lineLimit(nil)
+                                                .fixedSize(horizontal: false, vertical: true)
                                         }
 
                                         if shouldShowOriginalTitle {
                                             Text(window.title)
                                                 .foregroundStyle(.secondary)
-                                                .lineLimit(1)
+                                                .lineLimit(nil)
+                                                .fixedSize(horizontal: false, vertical: true)
                                         }
                                     }
                                 }
