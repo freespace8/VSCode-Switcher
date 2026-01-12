@@ -139,6 +139,7 @@
 				buildRules = (
 				);
 				dependencies = (
+					8A0C0RE00000000000000131 /* PBXTargetDependency */,
 				);
 				name = "VSCode-Switcher";
 				packageProductDependencies = (
@@ -279,6 +280,11 @@
 
 	/* Begin PBXTargetDependency section */
 			8A0C0RE00000000000000130 /* PBXTargetDependency */ = {
+				isa = PBXTargetDependency;
+				target = 8A0C0RE00000000000000100 /* VSCodeSwitcherCore */;
+				targetProxy = 8A0C0RE00000000000000041 /* PBXContainerItemProxy */;
+			};
+			8A0C0RE00000000000000131 /* PBXTargetDependency */ = {
 				isa = PBXTargetDependency;
 				target = 8A0C0RE00000000000000100 /* VSCodeSwitcherCore */;
 				targetProxy = 8A0C0RE00000000000000041 /* PBXContainerItemProxy */;
