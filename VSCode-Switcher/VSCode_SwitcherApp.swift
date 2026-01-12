@@ -11,6 +11,7 @@ import Carbon.HIToolbox
 import ApplicationServices
 import Darwin
 import os
+import VSCodeSwitcherCore
 
 extension Notification.Name {
     static let vsCodeSwitcherRequestRefresh = Notification.Name("VSCodeSwitcher.requestRefresh")
@@ -680,38 +681,18 @@ final class VSCodeWindowSwitcher {
         }
 
         let windowsByID = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
+        let existingIDs = Set(windowsByID.keys)
+        let normalized = WindowOrdering.normalizeOrder(order, existingIDs: existingIDs)
+        order = normalized.order
 
-        var didChangeOrder = false
+        let appended = WindowOrdering.applyNewIDsAppendingToEnd(
+            order: order,
+            existingIDs: Set(order),
+            inDiscoveryOrder: windows.map(\.id)
+        )
+        order = appended.order
 
-        var seenIDs = Set<String>()
-        seenIDs.reserveCapacity(order.count)
-
-        var normalizedOrder: [String] = []
-        normalizedOrder.reserveCapacity(order.count)
-        for id in order {
-            guard seenIDs.insert(id).inserted else {
-                didChangeOrder = true
-                continue
-            }
-            guard windowsByID[id] != nil else {
-                didChangeOrder = true
-                continue
-            }
-            normalizedOrder.append(id)
-        }
-        order = normalizedOrder
-
-        var knownIDs = Set(order)
-        knownIDs.reserveCapacity(order.count + windows.count)
-
-        // 新发现窗口统一追加到末尾，避免影响已有窗口的相对顺序（位置/快捷键）
-        for window in windows where !knownIDs.contains(window.id) {
-            order.append(window.id)
-            knownIDs.insert(window.id)
-            didChangeOrder = true
-        }
-
-        if didChangeOrder {
+        if normalized.didChange || appended.didChange {
             UserDefaults.standard.set(order, forKey: Constants.userDefaultsWindowOrderKey)
         }
 
@@ -734,10 +715,7 @@ final class VSCodeWindowSwitcher {
     func slotIndexForWindowID(_ id: String, limit: Int = 10) -> Int? {
         guard limit > 0 else { return nil }
         let order = loadWindowOrder()
-        for (index, slotID) in order.prefix(limit).enumerated() where slotID == id {
-            return index
-        }
-        return nil
+        return WindowOrdering.slotIndex(forWindowID: id, in: order, limit: limit)
     }
 
     func windowAliases() -> [String: String] {
@@ -1081,37 +1059,19 @@ final class VSCodeWindowSwitcher {
 
         let visibleFrame = targetScreen.visibleFrame
         guard visibleFrame.width > 0, visibleFrame.height > 0 else { return }
+        let defaults = UserDefaults.standard
+        let stored = defaults.object(forKey: Constants.userDefaultsSidebarWidthKey) as? Double
+        let requestedSidebarWidth = stored.map { CGFloat($0) } ?? 320
 
-        let aspectRatio = visibleFrame.width / max(1, visibleFrame.height)
-        let isUltrawide = aspectRatio >= 2.2
-        let containerFrame: CGRect
-        if isUltrawide {
-            containerFrame = CGRect(
-                x: visibleFrame.minX,
-                y: visibleFrame.minY,
-                width: visibleFrame.width * 0.5,
-                height: visibleFrame.height
-            )
-        } else {
-            containerFrame = visibleFrame
+        guard let layout = TilingLayout.compute(.init(visibleFrame: visibleFrame, requestedSidebarWidth: requestedSidebarWidth)) else {
+            return
         }
-
-        let sidebarWidth = computeSidebarWidth(in: containerFrame)
-        let appFrame = CGRect(x: containerFrame.minX, y: containerFrame.minY, width: sidebarWidth, height: containerFrame.height)
-        let codeY: CGFloat = isUltrawide ? 0 : containerFrame.minY
-        let codeHeight: CGFloat = isUltrawide ? containerFrame.maxY : containerFrame.height
-        let codeFrame = CGRect(
-            x: containerFrame.minX + sidebarWidth,
-            y: codeY,
-            width: max(0, containerFrame.width - sidebarWidth),
-            height: codeHeight
-        )
 
         if let appWindow {
-            appWindow.setFrame(appFrame, display: true, animate: false)
+            appWindow.setFrame(layout.appFrame, display: true, animate: false)
         }
 
-        setAXFrame(window: vsCodeWindow, frame: codeFrame)
+        setAXFrame(window: vsCodeWindow, frame: layout.codeFrame)
     }
 
     private func moveToAppWindowScreenIfNeeded(_ window: AXUIElement) {
@@ -1145,31 +1105,11 @@ final class VSCodeWindowSwitcher {
         let defaults = UserDefaults.standard
         let stored = defaults.object(forKey: Constants.userDefaultsSidebarWidthKey) as? Double
         let requested = stored.map { CGFloat($0) } ?? 320
-        return min(max(220, requested), visibleFrame.width * 0.5)
+        return Geometry.computeSidebarWidth(requested: requested, in: visibleFrame)
     }
 
     private func clampRect(_ rect: CGRect, into container: CGRect) -> CGRect {
-        guard rect.width > 0, rect.height > 0, container.width > 0, container.height > 0 else {
-            return rect
-        }
-
-        var clamped = rect
-        let maxX = container.maxX - rect.width
-        let maxY = container.maxY - rect.height
-
-        if maxX < container.minX {
-            clamped.origin.x = container.minX
-        } else {
-            clamped.origin.x = min(max(rect.minX, container.minX), maxX)
-        }
-
-        if maxY < container.minY {
-            clamped.origin.y = container.minY
-        } else {
-            clamped.origin.y = min(max(rect.minY, container.minY), maxY)
-        }
-
-        return clamped
+        Geometry.clampRect(rect, into: container)
     }
 
     private func copyAXFrame(from window: AXUIElement) -> CGRect? {
