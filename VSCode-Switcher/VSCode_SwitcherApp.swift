@@ -518,12 +518,29 @@ final class VSCodeWindowSwitcher {
 
     func showAppWindowOnTopWithoutActivating() {
         guard let appWindow else { return }
+        pinAppWindowTopIfNeeded()
         appWindow.level = .normal
         appWindow.orderFrontRegardless()
 #if DEBUG
         let frontmostAfter = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "-"
         Self.debugLogger.info("showAppWindowOnTopWithoutActivating: done frontmost=\(frontmostAfter, privacy: .public)")
 #endif
+    }
+
+    private func pinAppWindowTopIfNeeded() {
+        guard let appWindow else { return }
+
+        var frame = appWindow.frame
+        guard frame.height > 0, frame.width > 0 else { return }
+
+        guard let screen = appWindow.screen else { return }
+        let visible = screen.visibleFrame
+        guard visible.width > 0, visible.height > 0 else { return }
+
+        if frame.minY != visible.minY {
+            frame.origin.y = visible.minY
+            appWindow.setFrame(frame, display: true, animate: false)
+        }
     }
 
     private func focusVSCodeAlongsideAppWindowIfPossible() {
@@ -1062,16 +1079,32 @@ final class VSCodeWindowSwitcher {
         guard isAutoTileEnabled else { return }
         guard let targetScreen = appWindow?.screen else { return }
 
-        let screenFrame = targetScreen.frame
-        guard screenFrame.width > 0, screenFrame.height > 0 else { return }
+        let visibleFrame = targetScreen.visibleFrame
+        guard visibleFrame.width > 0, visibleFrame.height > 0 else { return }
 
-        let sidebarWidth = computeSidebarWidth(in: screenFrame)
-        let appFrame = CGRect(x: screenFrame.minX, y: screenFrame.minY, width: sidebarWidth, height: screenFrame.height)
+        let aspectRatio = visibleFrame.width / max(1, visibleFrame.height)
+        let isUltrawide = aspectRatio >= 2.2
+        let containerFrame: CGRect
+        if isUltrawide {
+            containerFrame = CGRect(
+                x: visibleFrame.minX,
+                y: visibleFrame.minY,
+                width: visibleFrame.width * 0.5,
+                height: visibleFrame.height
+            )
+        } else {
+            containerFrame = visibleFrame
+        }
+
+        let sidebarWidth = computeSidebarWidth(in: containerFrame)
+        let appFrame = CGRect(x: containerFrame.minX, y: containerFrame.minY, width: sidebarWidth, height: containerFrame.height)
+        let codeY: CGFloat = isUltrawide ? 0 : containerFrame.minY
+        let codeHeight: CGFloat = isUltrawide ? containerFrame.maxY : containerFrame.height
         let codeFrame = CGRect(
-            x: screenFrame.minX + sidebarWidth,
-            y: screenFrame.minY,
-            width: max(0, screenFrame.width - sidebarWidth),
-            height: screenFrame.height
+            x: containerFrame.minX + sidebarWidth,
+            y: codeY,
+            width: max(0, containerFrame.width - sidebarWidth),
+            height: codeHeight
         )
 
         if let appWindow {
