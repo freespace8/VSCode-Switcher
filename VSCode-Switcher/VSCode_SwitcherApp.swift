@@ -1137,6 +1137,23 @@ final class VSCodeWindowSwitcher {
         Geometry.clampRect(rect, into: container)
     }
 
+    private func primaryScreenFrameMaxY() -> CGFloat? {
+        let screens = NSScreen.screens
+        let originProbe = CGPoint(x: 1, y: 1)
+        if let primary = screens.first(where: { $0.frame.contains(originProbe) }) {
+            return primary.frame.maxY
+        }
+        if let main = NSScreen.main {
+            return main.frame.maxY
+        }
+        return screens.first?.frame.maxY
+    }
+
+    private func flipRectYAxisAgainstPrimaryScreen(_ rect: CGRect) -> CGRect {
+        guard let maxY = primaryScreenFrameMaxY() else { return rect }
+        return CGRect(x: rect.minX, y: maxY - rect.maxY, width: rect.width, height: rect.height)
+    }
+
     private func copyAXFrame(from window: AXUIElement) -> CGRect? {
         var positionValue: CFTypeRef?
         var sizeValue: CFTypeRef?
@@ -1171,12 +1188,13 @@ final class VSCodeWindowSwitcher {
             return nil
         }
 
-        return CGRect(origin: position, size: size)
+        return flipRectYAxisAgainstPrimaryScreen(CGRect(origin: position, size: size))
     }
 
     private func setAXFrame(window: AXUIElement, frame: CGRect) {
-        var position = CGPoint(x: frame.minX, y: frame.minY)
-        var size = CGSize(width: frame.width, height: frame.height)
+        let axFrame = flipRectYAxisAgainstPrimaryScreen(frame)
+        var position = CGPoint(x: axFrame.minX, y: axFrame.minY)
+        var size = CGSize(width: axFrame.width, height: axFrame.height)
 
         guard let positionValue = AXValueCreate(.cgPoint, &position),
               let sizeValue = AXValueCreate(.cgSize, &size) else {

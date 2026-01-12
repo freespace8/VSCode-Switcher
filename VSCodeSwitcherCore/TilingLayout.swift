@@ -42,15 +42,11 @@ public enum TilingLayout {
         let sidebarWidth = Geometry.computeSidebarWidth(requested: input.requestedSidebarWidth, in: containerFrame)
         let appFrame = CGRect(x: containerFrame.minX, y: containerFrame.minY, width: sidebarWidth, height: containerFrame.height)
 
-        // 保持当前 App 的行为：超宽屏时 VSCode 顶部贴 0；非超宽按 visibleFrame.minY。
-        let codeY: CGFloat = isUltrawide ? 0 : containerFrame.minY
-        let codeHeight: CGFloat = isUltrawide ? containerFrame.maxY : containerFrame.height
-
         let codeFrame = CGRect(
             x: containerFrame.minX + sidebarWidth,
-            y: codeY,
+            y: containerFrame.minY,
             width: max(0, containerFrame.width - sidebarWidth),
-            height: codeHeight
+            height: containerFrame.height
         )
 
         return TilingLayoutOutput(

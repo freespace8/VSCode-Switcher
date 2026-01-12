@@ -19,14 +19,14 @@ final class TilingLayoutTests: XCTestCase {
         XCTAssertEqual(output.codeFrame.height, visible.height)
     }
 
-    func testCompute_ultrawideUsesLeftHalfAndCodeYIsZero() {
+    func testCompute_ultrawideUsesLeftHalfAndUsesContainerMinY() {
         let visible = CGRect(x: 0, y: 25, width: 2520, height: 1080) // 21:9-ish
         let output = TilingLayout.compute(.init(visibleFrame: visible, requestedSidebarWidth: 320))!
         XCTAssertTrue(output.isUltrawide)
         XCTAssertEqual(output.containerFrame.width, visible.width * 0.5, accuracy: 0.001)
         XCTAssertEqual(output.containerFrame.minX, visible.minX)
         XCTAssertEqual(output.containerFrame.minY, visible.minY)
-        XCTAssertEqual(output.codeFrame.minY, 0)
+        XCTAssertEqual(output.codeFrame.minY, output.containerFrame.minY)
         XCTAssertEqual(output.codeFrame.maxY, output.containerFrame.maxY)
     }
 
@@ -38,4 +38,3 @@ final class TilingLayoutTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(output.codeFrame.width, 0)
     }
 }
-
