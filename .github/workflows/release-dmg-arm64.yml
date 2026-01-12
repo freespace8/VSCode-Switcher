@@ -26,6 +26,7 @@ jobs:
           rm -rf "$BUILD_DIR"
           mkdir -p "$BUILD_DIR"
 
+          # Build the app. The build dir is shared so dependent targets (e.g. frameworks) land in the same place.
           xcodebuild \
             -project VSCode-Switcher.xcodeproj \
             -target VSCode-Switcher \
@@ -46,6 +47,41 @@ jobs:
             echo "Expected arm64-only binary, got: $ARCHS_FOUND" >&2
             exit 1
           fi
+
+          # Ensure VSCodeSwitcherCore.framework is bundled inside the .app and referenced via @rpath.
+          #
+          # If the binary links against an absolute path like /Library/Frameworks/VSCodeSwitcherCore.framework,
+          # the packaged app will quit immediately on end-user machines where that framework isn't installed.
+          CORE_FW_SRC="$BUILD_DIR/VSCodeSwitcherCore.framework"
+          if [[ ! -d "$CORE_FW_SRC" ]]; then
+            xcodebuild \
+              -project VSCode-Switcher.xcodeproj \
+              -target VSCodeSwitcherCore \
+              -configuration Release \
+              CONFIGURATION_BUILD_DIR="$BUILD_DIR" \
+              ARCHS=arm64 \
+              ONLY_ACTIVE_ARCH=YES \
+              CODE_SIGNING_ALLOWED=NO \
+              build
+          fi
+          test -d "$CORE_FW_SRC"
+
+          mkdir -p "$APP_PATH/Contents/Frameworks"
+          rm -rf "$APP_PATH/Contents/Frameworks/VSCodeSwitcherCore.framework"
+          ditto "$CORE_FW_SRC" "$APP_PATH/Contents/Frameworks/VSCodeSwitcherCore.framework"
+
+          CORE_FW_DYLIB="/Library/Frameworks/VSCodeSwitcherCore.framework/Versions/A/VSCodeSwitcherCore"
+          CORE_FW_RPATH="@rpath/VSCodeSwitcherCore.framework/Versions/A/VSCodeSwitcherCore"
+
+          # Fix the framework's install name (LC_ID_DYLIB) and the app's load command if it was absolute.
+          install_name_tool -id "$CORE_FW_RPATH" "$APP_PATH/Contents/Frameworks/VSCodeSwitcherCore.framework/Versions/A/VSCodeSwitcherCore"
+          install_name_tool -change "$CORE_FW_DYLIB" "$CORE_FW_RPATH" "$BIN_PATH" || true
+
+          # Make sure the binary has a usable rpath (most projects already do; this is a safety net).
+          install_name_tool -add_rpath "@executable_path/../Frameworks" "$BIN_PATH" 2>/dev/null || true
+
+          # Ad-hoc sign so the embedded framework loads cleanly on end-user machines.
+          codesign --force --sign - --deep "$APP_PATH"
 
           VERSION="${GITHUB_REF_NAME}"
           DIST_DIR="$PWD/dist"
