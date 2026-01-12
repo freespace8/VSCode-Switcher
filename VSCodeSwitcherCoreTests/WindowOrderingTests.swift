@@ -37,5 +37,45 @@ final class WindowOrderingTests: XCTestCase {
         XCTAssertNil(WindowOrdering.slotIndex(forWindowID: "d", in: order, limit: 3))
         XCTAssertNil(WindowOrdering.slotIndex(forWindowID: "a", in: order, limit: 0))
     }
-}
 
+    func testWindowDiscoveryAndRemoval_keepsRelativeOrderAndShiftsSlots() {
+        // Step 1: discover A
+        var order: [String] = ["A"]
+
+        // Step 2: discover B, append to tail
+        do {
+            let existing: Set<String> = ["A", "B"]
+            let normalized = WindowOrdering.normalizeOrder(order, existingIDs: existing)
+            XCTAssertEqual(normalized.order, ["A"])
+            XCTAssertFalse(normalized.didChange)
+
+            let appended = WindowOrdering.applyNewIDsAppendingToEnd(
+                order: normalized.order,
+                existingIDs: Set(normalized.order),
+                inDiscoveryOrder: ["A", "B"]
+            )
+            XCTAssertEqual(appended.order, ["A", "B"])
+            XCTAssertTrue(appended.didChange)
+            order = appended.order
+        }
+
+        // Step 3: A disappears, remove A without changing other order
+        do {
+            let existing: Set<String> = ["B"]
+            let normalized = WindowOrdering.normalizeOrder(order, existingIDs: existing)
+            XCTAssertEqual(normalized.order, ["B"])
+            XCTAssertTrue(normalized.didChange)
+            order = normalized.order
+        }
+
+        // Slot indices should shift up when an earlier window disappears.
+        XCTAssertEqual(WindowOrdering.slotIndex(forWindowID: "B", in: order, limit: 10), 0)
+
+        // Example: if A was slot 2, B should become slot 2 after A is removed.
+        let before = ["X", "A", "B"] // A is slot 2 (index 1), B is slot 3 (index 2)
+        let after = WindowOrdering.normalizeOrder(before, existingIDs: ["X", "B"]).order
+        XCTAssertEqual(after, ["X", "B"])
+        XCTAssertEqual(WindowOrdering.slotIndex(forWindowID: "B", in: before, limit: 10), 2)
+        XCTAssertEqual(WindowOrdering.slotIndex(forWindowID: "B", in: after, limit: 10), 1)
+    }
+}

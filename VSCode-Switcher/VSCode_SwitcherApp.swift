@@ -453,7 +453,6 @@ final class VSCodeWindowSwitcher {
         static let userDefaultsNumberMappingKey = "VSCodeSwitcher.numberMapping"
         static let axWindowNumberAttribute: CFString = "AXWindowNumber" as CFString
         static let accessibilityAlertShownKey = "VSCodeSwitcher.accessibilityAlertShown"
-        static let userDefaultsWindowOrderKey = "VSCodeSwitcher.windowOrder"
         static let userDefaultsWindowAliasesKey = "VSCodeSwitcher.windowAliases"
         static let userDefaultsAutoTileKey = "VSCodeSwitcher.autoTile"
         static let userDefaultsSidebarWidthKey = "VSCodeSwitcher.sidebarWidth"
@@ -468,6 +467,8 @@ final class VSCodeWindowSwitcher {
     }
 
     private weak var appWindow: NSWindow?
+    private var windowOrderInMemory: [String]?
+    private var windowNumberCache: [String: Int] = [:]
 
     var isAutoTileEnabled: Bool {
         get { UserDefaults.standard.object(forKey: Constants.userDefaultsAutoTileKey) as? Bool ?? true }
@@ -618,6 +619,8 @@ final class VSCodeWindowSwitcher {
 
         var items: [VSCodeWindowItem] = []
 
+        var identityKeysSeen: Set<String> = []
+
         for bundleIdentifier in Self.supportedBundleIdentifiers {
             let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
             for app in runningApps {
@@ -645,18 +648,32 @@ final class VSCodeWindowSwitcher {
 
                 for window in windows {
                     let title = copyWindowTitle(from: window) ?? "(Untitled)"
+                    let identityTitle = normalizeTitleForIdentity(title)
+                    let identityKey = "\(bundleIdentifier):\(pid):\(identityTitle)"
+                    identityKeysSeen.insert(identityKey)
+
+                    var windowNumber = copyWindowNumber(from: window)
+                    if windowNumber == nil, let cached = windowNumberCache[identityKey] {
+                        windowNumber = cached
+                    }
+                    if let windowNumber {
+                        windowNumberCache[identityKey] = windowNumber
+                    }
                     items.append(
                         VSCodeWindowItem(
                             bundleIdentifier: bundleIdentifier,
                             pid: pid,
-                            windowNumber: copyWindowNumber(from: window),
+                            windowNumber: windowNumber,
                             title: title,
-                            appDisplayName: app.localizedName
+                            appDisplayName: app.localizedName,
+                            identityTitle: identityTitle
                         )
                     )
                 }
             }
         }
+
+        windowNumberCache = windowNumberCache.filter { identityKeysSeen.contains($0.key) }
 
         items.sort { lhs, rhs in
             if lhs.appDisplayName != rhs.appDisplayName {
@@ -673,10 +690,8 @@ final class VSCodeWindowSwitcher {
         var order = loadWindowOrder()
 
         if order.isEmpty {
-            if !windows.isEmpty {
-                order = windows.map(\.id)
-                UserDefaults.standard.set(order, forKey: Constants.userDefaultsWindowOrderKey)
-            }
+            if !windows.isEmpty { order = windows.map(\.id) }
+            windowOrderInMemory = order.isEmpty ? nil : order
             return windows
         }
 
@@ -692,9 +707,7 @@ final class VSCodeWindowSwitcher {
         )
         order = appended.order
 
-        if normalized.didChange || appended.didChange {
-            UserDefaults.standard.set(order, forKey: Constants.userDefaultsWindowOrderKey)
-        }
+        if normalized.didChange || appended.didChange { windowOrderInMemory = order.isEmpty ? nil : order }
 
         var ordered: [VSCodeWindowItem] = []
         ordered.reserveCapacity(windows.count)
@@ -709,7 +722,7 @@ final class VSCodeWindowSwitcher {
 
     func saveWindowOrder(_ windows: [VSCodeWindowItem]) {
         let ids = windows.map(\.id)
-        UserDefaults.standard.set(ids, forKey: Constants.userDefaultsWindowOrderKey)
+        windowOrderInMemory = ids.isEmpty ? nil : ids
     }
 
     func slotIndexForWindowID(_ id: String, limit: Int = 10) -> Int? {
@@ -781,12 +794,24 @@ final class VSCodeWindowSwitcher {
         }
         let axWindow = unsafeBitCast(window, to: AXUIElement.self)
 
+        let title = copyWindowTitle(from: axWindow) ?? "(Untitled)"
+        let identityTitle = normalizeTitleForIdentity(title)
+        let identityKey = "\(bundleIdentifier):\(pid):\(identityTitle)"
+        var windowNumber = copyWindowNumber(from: axWindow)
+        if windowNumber == nil, let cached = windowNumberCache[identityKey] {
+            windowNumber = cached
+        }
+        if let windowNumber {
+            windowNumberCache[identityKey] = windowNumber
+        }
+
         return VSCodeWindowItem(
             bundleIdentifier: bundleIdentifier,
             pid: pid,
-            windowNumber: copyWindowNumber(from: axWindow),
-            title: copyWindowTitle(from: axWindow) ?? "(Untitled)",
-            appDisplayName: frontmost.localizedName
+            windowNumber: windowNumber,
+            title: title,
+            appDisplayName: frontmost.localizedName,
+            identityTitle: identityTitle
         )
     }
 
@@ -965,7 +990,7 @@ final class VSCodeWindowSwitcher {
     }
 
     private func loadWindowOrder() -> [String] {
-        (UserDefaults.standard.array(forKey: Constants.userDefaultsWindowOrderKey) as? [String]) ?? []
+        windowOrderInMemory ?? []
     }
 
     private func saveWindowAliases(_ aliases: [String: String]) {
@@ -1188,6 +1213,14 @@ final class VSCodeWindowSwitcher {
         return number.intValue
     }
 
+    private func normalizeTitleForIdentity(_ title: String) -> String {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("●") || trimmed.hasPrefix("•") || trimmed.hasPrefix("◦") {
+            return trimmed.dropFirst().trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return trimmed
+    }
+
     private func saveNumberMapping(_ mappings: [Int: WindowBookmark]) {
         do {
             let data = try JSONEncoder().encode(mappings)
@@ -1318,11 +1351,12 @@ struct VSCodeWindowItem: Identifiable, Hashable {
     let windowNumber: Int?
     let title: String
     let appDisplayName: String?
+    let identityTitle: String
 
     var id: String {
         if let windowNumber {
             return "\(bundleIdentifier):\(pid):\(windowNumber)"
         }
-        return "\(bundleIdentifier):\(pid):\(title)"
+        return "\(bundleIdentifier):\(pid):\(identityTitle)"
     }
 }
