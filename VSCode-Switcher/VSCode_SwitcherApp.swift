@@ -183,6 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var autoTileMenuItem: NSMenuItem?
     private var diagnosticsHeartbeatTimer: DispatchSourceTimer?
     private var sigtermSource: DispatchSourceSignal?
+    private var bypassTerminateConfirmation: Bool = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "-"
@@ -205,6 +206,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         Diagnostics.shared.log("applicationWillTerminate")
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Diagnostics.shared.increment("app.shouldTerminate")
+
+        if bypassTerminateConfirmation {
+            Diagnostics.shared.log("applicationShouldTerminate: bypass confirmation")
+            return .terminateNow
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "确定要退出 VSCode-Switcher 吗？"
+        alert.informativeText = "退出后菜单栏快捷切换将不可用。"
+        alert.addButton(withTitle: "退出")
+        alert.addButton(withTitle: "取消")
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            Diagnostics.shared.log("applicationShouldTerminate: confirmed by user")
+            return .terminateNow
+        }
+
+        Diagnostics.shared.log("applicationShouldTerminate: cancelled by user")
+        return .terminateCancel
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -231,6 +256,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         Diagnostics.shared.log("enforceSingleInstanceOrExit: terminate self (existing instance detected)")
+        bypassTerminateConfirmation = true
         NSApp.terminate(nil)
     }
 
@@ -267,6 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         source.setEventHandler {
             Diagnostics.shared.log("SIGTERM received")
             DispatchQueue.main.async {
+                self.bypassTerminateConfirmation = true
                 NSApp.terminate(nil)
             }
         }
@@ -620,6 +647,7 @@ final class VSCodeWindowSwitcher {
         var items: [VSCodeWindowItem] = []
 
         var identityKeysSeen: Set<String> = []
+        var identityTokenCountsByPID: [pid_t: [String: Int]] = [:]
 
         for bundleIdentifier in Self.supportedBundleIdentifiers {
             let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
@@ -646,10 +674,34 @@ final class VSCodeWindowSwitcher {
                 }
                 guard let windows = windowsInfo.windows else { continue }
 
-                for window in windows {
+                for (index, window) in windows.enumerated() {
                     let title = copyWindowTitle(from: window) ?? "(Untitled)"
-                    let identityTitle = normalizeTitleForIdentity(title)
-                    let identityKey = "\(bundleIdentifier):\(pid):\(identityTitle)"
+                    let normalizedTitle = normalizeTitleForIdentity(title)
+                    let identifier = copyWindowIdentifier(from: window)
+                    let frameToken: String? = identifier == nil ? copyAXFrame(from: window).map(frameIdentityToken) : nil
+
+                    var identityToken: String
+                    if let identifier {
+                        identityToken = "id:\(identifier)"
+                    } else if let frameToken {
+                        identityToken = "t:\(normalizedTitle)|f:\(frameToken)"
+                    } else {
+                        identityToken = "t:\(normalizedTitle)"
+                    }
+
+                    if identifier == nil {
+                        var counts = identityTokenCountsByPID[pid] ?? [:]
+                        if let seenCount = counts[identityToken] {
+                            counts[identityToken] = seenCount + 1
+                            identityToken += "|i:\(index)"
+                            Diagnostics.shared.increment("window.identityTokenDedup")
+                        } else {
+                            counts[identityToken] = 1
+                        }
+                        identityTokenCountsByPID[pid] = counts
+                    }
+
+                    let identityKey = "\(bundleIdentifier):\(pid):\(identityToken)"
                     identityKeysSeen.insert(identityKey)
 
                     var windowNumber = copyWindowNumber(from: window)
@@ -666,7 +718,7 @@ final class VSCodeWindowSwitcher {
                             windowNumber: windowNumber,
                             title: title,
                             appDisplayName: app.localizedName,
-                            identityTitle: identityTitle
+                            identityTitle: identityToken
                         )
                     )
                 }
@@ -695,7 +747,20 @@ final class VSCodeWindowSwitcher {
             return windows
         }
 
-        let windowsByID = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
+        var windowsByID: [String: VSCodeWindowItem] = [:]
+        windowsByID.reserveCapacity(windows.count)
+        var didDetectDuplicateIDs = false
+        for window in windows {
+            if windowsByID[window.id] != nil {
+                didDetectDuplicateIDs = true
+                Diagnostics.shared.increment("window.duplicateID")
+                continue
+            }
+            windowsByID[window.id] = window
+        }
+        if didDetectDuplicateIDs {
+            Diagnostics.shared.logOnce("window.duplicateID", "listOrderedVSCodeWindows: duplicate window IDs detected; keeping first occurrences")
+        }
         let existingIDs = Set(windowsByID.keys)
         let normalized = WindowOrdering.normalizeOrder(order, existingIDs: existingIDs)
         order = normalized.order
@@ -795,8 +860,20 @@ final class VSCodeWindowSwitcher {
         let axWindow = unsafeBitCast(window, to: AXUIElement.self)
 
         let title = copyWindowTitle(from: axWindow) ?? "(Untitled)"
-        let identityTitle = normalizeTitleForIdentity(title)
-        let identityKey = "\(bundleIdentifier):\(pid):\(identityTitle)"
+        let normalizedTitle = normalizeTitleForIdentity(title)
+        let identifier = copyWindowIdentifier(from: axWindow)
+        let frameToken: String? = identifier == nil ? copyAXFrame(from: axWindow).map(frameIdentityToken) : nil
+
+        let identityToken: String
+        if let identifier {
+            identityToken = "id:\(identifier)"
+        } else if let frameToken {
+            identityToken = "t:\(normalizedTitle)|f:\(frameToken)"
+        } else {
+            identityToken = "t:\(normalizedTitle)"
+        }
+
+        let identityKey = "\(bundleIdentifier):\(pid):\(identityToken)"
         var windowNumber = copyWindowNumber(from: axWindow)
         if windowNumber == nil, let cached = windowNumberCache[identityKey] {
             windowNumber = cached
@@ -811,7 +888,7 @@ final class VSCodeWindowSwitcher {
             windowNumber: windowNumber,
             title: title,
             appDisplayName: frontmost.localizedName,
-            identityTitle: identityTitle
+            identityTitle: identityToken
         )
     }
 
@@ -1222,6 +1299,15 @@ final class VSCodeWindowSwitcher {
         return value as? String
     }
 
+    private func copyWindowIdentifier(from window: AXUIElement) -> String? {
+        var value: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(window, "AXIdentifier" as CFString, &value)
+        guard result == .success else { return nil }
+        let raw = value as? String
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
+    }
+
     private func copyWindowNumber(from window: AXUIElement) -> Int? {
         var value: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(window, Constants.axWindowNumberAttribute, &value)
@@ -1237,6 +1323,14 @@ final class VSCodeWindowSwitcher {
             return trimmed.dropFirst().trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return trimmed
+    }
+
+    private func frameIdentityToken(_ frame: CGRect) -> String {
+        let x = Int(frame.origin.x.rounded())
+        let y = Int(frame.origin.y.rounded())
+        let w = Int(frame.size.width.rounded())
+        let h = Int(frame.size.height.rounded())
+        return "\(x),\(y),\(w),\(h)"
     }
 
     private func saveNumberMapping(_ mappings: [Int: WindowBookmark]) {

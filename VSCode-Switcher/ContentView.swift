@@ -33,10 +33,21 @@ final class VSCodeWindowsViewModel: ObservableObject {
     func refresh() {
         Diagnostics.shared.increment("vm.refresh")
         hasAccessibilityPermission = switcher.hasAccessibilityPermission()
+        if !hasAccessibilityPermission {
+            windows = []
+            windowAliases = switcher.windowAliases()
+            diagnosticsText = switcher.diagnosticsSummary()
+            activeWindow = nil
+            return
+        }
         let isVSCodeFrontmost = switcher.isFrontmostVSCodeApplication()
         let hasRunningVSCode = switcher.hasRunningVSCodeApplication()
         let newWindows = switcher.listOrderedVSCodeWindows(allowActivate: false)
-        if !newWindows.isEmpty || isVSCodeFrontmost || !hasRunningVSCode {
+        if newWindows.isEmpty && hasRunningVSCode && !windows.isEmpty {
+#if DEBUG
+            Self.logger.info("refresh: skip clearing windows old_count=\(self.windows.count) new_empty while VSCode running")
+#endif
+        } else if !newWindows.isEmpty || isVSCodeFrontmost || !hasRunningVSCode {
             windows = newWindows
 #if DEBUG
             Self.logger.info("refresh: windows updated count=\(newWindows.count)")
@@ -65,10 +76,12 @@ final class VSCodeWindowsViewModel: ObservableObject {
         }
 
         let isVSCodeFrontmost = switcher.isFrontmostVSCodeApplication()
+        let hasRunningVSCode = switcher.hasRunningVSCodeApplication()
         let newWindows = switcher.listOrderedVSCodeWindows(allowActivate: false)
-        if newWindows.isEmpty && !windows.isEmpty && !isVSCodeFrontmost {
+        if newWindows.isEmpty && hasRunningVSCode && !windows.isEmpty {
+            Diagnostics.shared.increment("vm.skipEmptyWindows")
 #if DEBUG
-            Self.logger.info("refreshWindowsListIfChanged: skip clearing windows old_count=\(self.windows.count) (new empty; VSCode not frontmost)")
+            Self.logger.info("refreshWindowsListIfChanged: skip clearing windows old_count=\(self.windows.count) (new empty; VSCode running)")
 #endif
             activeWindow = switcher.frontmostVSCodeWindow()
             switcher.rememberLastActiveWindow(activeWindow)
